@@ -1,0 +1,3 @@
+#g++ -O0 -g -Wall -mavx512f -march=skylake-avx512 -std=c++17 main.cpp -lpthread -o logging_poc
+echo 'g++ -O'$1' -D'$2' -g -Wall -mavx512f -mclwb -march=skylake-avx512 -std=c++17 main.cpp -lpthread -o logging_poc'
+g++ -O$1 -D$2 -g -Wall -mavx512f -mclwb -march=skylake-avx512 -std=c++17 main.cpp -lpthread -o logging_poc
