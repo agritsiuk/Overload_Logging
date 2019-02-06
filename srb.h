@@ -59,7 +59,7 @@ public:
 
         // eject log memory from cache
         for (int i = 0; i <ringBuffSize_+ringBuffOverflow_; i+= 64)
-            _mm_clflushopt(ringBuff_+i);
+            _mm_clflush(ringBuff_+i);
     }
 
     // do proper bounds checking later
@@ -224,7 +224,7 @@ public:
 
         // eject log memory from cache
         for (int i = 0; i <ringBuffSize_; ++i)
-            _mm_clflushopt(ringBuff_+i);
+            _mm_clflush(ringBuff_+i);
 
         head_ = 0;
         tail_ = 0;

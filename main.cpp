@@ -60,6 +60,7 @@ void setAffinity(
 		  std::thread& t 
 		, uint32_t cpuid )
 {
+    std::cerr << "Setting affinity for core " << cpuid << std::endl;
 	cpu_set_t cpuset;
 	CPU_ZERO(&cpuset);
 	CPU_SET(cpuid, &cpuset);
