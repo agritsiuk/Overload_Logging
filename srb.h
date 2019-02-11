@@ -38,6 +38,8 @@ public:
         std::cout << "Head = " << getHead() << std::endl;
         std::cout << "Tail = " << getTail() << std::endl;
         std::cout << "Diff = " << getHead() - getTail() << std::endl;
+        std::cout << "raw flushedHead = " << (flushedHead_.load()) << std::endl;
+        std::cout << "raw flushedTail = " << (flushedTail_.load()) << std::endl;
         std::cout << "flushedHead = " << (flushedHead_.load() & ringBuffMask_) << std::endl;
         std::cout << "flushedTail = " << (flushedTail_.load() & ringBuffMask_) << std::endl;
         std::cout << "flushed Diff = " << flushedHead_.load() - flushedTail_.load() << std::endl;
@@ -62,21 +64,24 @@ public:
             _mm_clflush(ringBuff_+i);
     }
 
-    // do proper bounds checking later
-
+    // TODO:FIXME do proper bounds checking later
     int32_t getHead( int32_t diff = 0 ) { return (head_+diff) & ringBuffMask_; }
     int32_t getTail( int32_t diff = 0 ) { return (tail_+diff) & ringBuffMask_; }
 
+    int32_t getFreeSpace () 
+    {
+        return ringBuffSize_ - (flushedHead_.load(std::memory_order_relaxed) - flushedTail_.load(std::memory_order_relaxed)); 
+    }
+
     char* pickProduce (int32_t sz = 0) 
-    { auto ft = flushedTail_.load(std::memory_order_acquire); return (head_ - ft > ringBuffSize_ - 128) ? nullptr : ringBuff_ + getHead(); }
+    {
+        auto ft = flushedTail_.load(std::memory_order_acquire); return (head_ - ft > ringBuffSize_ - (128+sz)) ? nullptr : ringBuff_ + getHead(); 
+    }
 
     char* pickConsume (int32_t sz = 0) 
-    { auto fh = flushedHead_.load(std::memory_order_acquire); return fh - tail_ < 1 ? nullptr : ringBuff_ + getTail(); }
-    //
-    //char* pickProduce () { return head_ - tail_ > ringBuffSize_ - 128 ? nullptr : ringBuff_ + getHead(); }
-    //char* pickConsume () { return head_ - tail_ < 1 ? nullptr : ringBuff_ + getTail(); }
-
-    //char* pickConsume () { auto r = head_ - tail_; std::cout << " '" << r << "'"; return r < 1 ? nullptr : ringBuff_ + getTail(); }
+    {
+        auto fh = flushedHead_.load(std::memory_order_acquire); return fh - (tail_+sz) < 1 ? nullptr : ringBuff_ + getTail(); 
+    }
 
     void produce ( uint32_t sz ) { head_ += sz; }
     void consume ( uint32_t sz ) { tail_ += sz; }
@@ -87,6 +92,7 @@ public:
 #ifdef FP_AUX
         return;
 #endif
+
         auto lDiff = last - (last % 64);
         auto cDiff = offset - (offset % 64);
 
@@ -109,11 +115,13 @@ public:
 
     void cleanUpConsume()
     {
+#if defined(LOG_CLFLUSHOPT1) || defined(LOG_CLFLUSHOPT2) || defined(LOG_CLFLUSHOPT3)
         cleanUp(lastTail_, tail_);
+#endif
         // consumption is typically on the slow path, don't need this optimization
         // If T1 is L2 and higher then L3 is untouched!  This is not a speed optimizatoin
         // but a zero touch L3?
-        _mm_prefetch(ringBuff_ + getTail()  +(64*4), _MM_HINT_T1); // about 6-7 cpu cycle improvement (@ 10%)
+        //_mm_prefetch(ringBuff_ + getTail()  +(64*4), _MM_HINT_T1); // about 6-7 cpu cycle improvement (@ 10%)
         // is memory_order_release sufficent?
         flushedTail_.store(tail_, std::memory_order_release);
     }

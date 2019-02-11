@@ -1,3 +1,25 @@
+///////////////////////////////////////////////////////////////////////////////
+// Compile time options
+//
+// Used for different log encoding methodologies
+// LOG_NTS - SSE non temporal store operations
+// LOG_CLFLUSHOPT1, LOG_CLFLUSHOPT2, LOG_CLFLUSHOPT3 - use CLFLUSH[OPT]
+//
+// Used for measuring the impact of sfence for use with SSE NTS
+// ADD_MARKER
+//
+// Used as an alternative flushing methodology requiring another thread
+// to execute the flush command.
+// FP_AUX
+//
+// FP_AUX should only be used with LOG_CLFLUSHOPT1, LOG_CLFLUSHOPT2 
+// or LOG_CLFLUSHOPT3
+//
+//
+// To run all threads on the same numa node on L29
+// ./logging_poc  0.2.4.6.8.0f2l4a
+// Cores 11, 13 and 15 will be used (15 only if FP_AUX is defined)
+///////////////////////////////////////////////////////////////////////////////
 #include <iostream>
 #include <memory>
 #include <thread>
@@ -19,36 +41,6 @@
 #include <x86intrin.h>
 
 #include "srb.h"
-
-// uncomment to compile for use of CLFLUSHOPT rather than NTS
-//#define LOG_CLFLUSHOPT
-//*
-uint64_t getcc_b ( void )
-{
-	unsigned cycles_low, cycles_high;
-
-	asm volatile (	
-					"CPUID\n\t"
-					"RDTSCP\n\t"
-					"mov %%edx, %0\n\t"
-					"mov %%eax, %1\n\t" : "=r" (cycles_high), "=r" (cycles_low)::
-					"%rax", "%rbx", "%rcx", "%rdx");
-
-	return ((uint64_t)cycles_high << 32 | cycles_low);
-}
-
-uint64_t getcc_e ( void )
-{
-	unsigned cycles_low, cycles_high;
-
-	asm volatile (
-					"RDTSCP\n\t"
-					"mov %%edx, %0\n\t"
-					"mov %%eax, %1\n\t CPUID\n\t" : "=r" (cycles_high), "=r" (cycles_low)::
-					"%rax", "%rbx", "%rcx", "%rdx");
-
-	return ((uint64_t)cycles_high << 32 | cycles_low);
-}
 
 void wait ( uint32_t cycles )
 {
@@ -85,7 +77,7 @@ void setAffinity(
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-
+// used to debug a few segfaults.
 SimpleRingBuff* pSRB{nullptr};
 void segfault_sigaction(int signal, siginfo_t *si, void *arg)
 {
@@ -122,18 +114,17 @@ void rbCleanup ( SimpleRingBuff& srb, int32_t& lastHead, int32_t& lastTail )
 
 void auxFastPathLoop ( void )
 {
-    //*
     SRBVec_t localSRBs;
     { // scope the lock guard
         std::lock_guard<std::mutex> lock(rbGuard_);
         localSRBs = ringBuffers_;
     }
 
+    // TODO: FIXME
+    // update for SRBVec_t to hold lastHead and lastTail or include with SRBs?
     // TESTING: only works with one RB 
     int32_t lastHead{0};
     int32_t lastTail{0};
-
-    int32_t iter = 0;
 
     while (running.load(std::memory_order_relaxed))
     {
@@ -147,20 +138,15 @@ void auxFastPathLoop ( void )
         for (auto i : localSRBs)
         {
             rbCleanup(*i, lastHead, lastTail);
-            //if ( not (iter % 100))
-            //    std::cout << "rbCleanup " << lastHead << " -- " << lastTail << std::endl;
         }
 
         //wait(300);
-        ++iter;
     }
-    // */
 }
 
 }
 ///////////////////////////////////////////////////////////////////////////////
 
-uint64_t last{0};
 
 template <std::size_t... Idx>
 auto make_index_dispatcher(std::index_sequence<Idx...>) 
@@ -182,16 +168,24 @@ void for_each(Tuple&& t, Func&& f)
     dispatcher([&f,&t](auto idx) { f(std::get<idx>(std::forward<Tuple>(t))); });
 }
 
+template <typename... T>
+using TupleNR_t = std::tuple<typename std::decay<T>::type...>;
+//using TupleNR_t = std::tuple<typename std::remove_reference<T>::type...>;
+
 template <typename... Args>
 struct alignas(8) Payload
 {
     using Func_t = uint64_t (*)(SimpleRingBuff&);
     using Tuple_t = std::tuple<Args...>;
-        
+
     Payload(Func_t f, Args&&... args) : func_(f), data(args...) {  }
     Func_t func_;
-    Tuple_t data;
+    //Tuple_t data;
+    TupleNR_t<Args...> data; // construct tuple of values
 };
+
+// for calculating time between debug statements
+uint64_t last{0};
 
 template <typename... Args>
 uint64_t writeLog (SimpleRingBuff& srb)
@@ -201,11 +195,12 @@ uint64_t writeLog (SimpleRingBuff& srb)
     Payload_t *a = reinterpret_cast<Payload_t*>(srb.pickConsume());
 
     // this should never happen?
-    if (a == nullptr)
+    if (a == nullptr )//|| *(int*)&a->data == 0)
         return 0;
 
     if constexpr(sizeof...(Args) != 0)
     {
+        std::cout << static_cast<float>(srb.getFreeSpace())/(1024*1024) << " ";
         // first element is timestamp, this is temporary to caluclate cycles between calls
         std::cout << std::get<0>(a->data) - last << " ";
         last = std::get<0>(a->data);
@@ -213,8 +208,11 @@ uint64_t writeLog (SimpleRingBuff& srb)
         // TODO? rework for printf style output using first argument of tuple as string?
         for_each(a->data, [] (const auto& t) { std::cout << t << " ";});
 
-        std::cout << " sizeof Payload = " << sizeof(Payload_t);
+        std::cout << " sizeof Payload = " << sizeof(Payload_t) << " ";
 
+        memset(a, 0, sizeof(Payload_t));
+
+        std::cout << " after memset, " << (intptr_t)a->func_;
         srb.consume(sizeof(Payload_t));
     }
 
@@ -226,11 +224,11 @@ uint64_t writeLog (SimpleRingBuff& srb)
 template <typename... Args>
 uint64_t cbLog (SimpleRingBuff& srb)
 {
-    // advance past pointer to myself
-    //srb.consume(sizeof(void*));
-
     using Timestamp_t = int64_t;
     return writeLog<Timestamp_t, Args...>(srb);
+
+
+    //return writeLog<Timestamp_t, typename std::remove_reference<Args>::type...>(srb);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -239,14 +237,13 @@ uint64_t cbLog (SimpleRingBuff& srb)
 class Logger
 {
 public:
-    constexpr static int dataStore{1024*256*16};
+    constexpr static int dataStore{1024*1024*16};
 
 private:
     SimpleRingBuff data;//[dataStore];
 
-    int32_t lastFlush{0};
-    int32_t flushMask{~0xF};
     uint32_t loggerCore_{0};
+    uint32_t logMiss_{0};
 
     std::unique_ptr<std::thread> logOut_;
     std::atomic_bool running_{false};
@@ -280,187 +277,166 @@ public:
     {
         running_ = false;
         logOut_->join();
+    }
+
+    void dbgPrint()
+    {
         data.dbgPrint();
+        std::cout << "Missed Logs " << logMiss_ << std::endl;
+    }
+
+    inline void sfence()
+    {
+#   ifdef ADD_MARKER
+        _mm_sfence();
+#   endif
     }
 
     ///////////////////////////////////////////////////////////////////////////////
 #ifdef LOG_CLFLUSHOPT1
-    //* origional
-
-
     template <typename... Args>
     void userLog (Args&&... args)
     {
         auto timeStamp = __rdtsc();
-        using Payload_t = Payload<decltype(timeStamp), Args...>;
+        using TimeStamp_t = decltype(timeStamp);
+        using Payload_t = Payload<TimeStamp_t, Args...>;
 
-        void* mem = data.pickProduce(sizeof(Payload_t));
+        char* mem = data.pickProduce(sizeof(Payload_t));
         if (mem == nullptr)
+        {
+            ++logMiss_;
             return;
+        }
 
         // The beauty of placement new!
-        [[maybe_unused]]Payload_t* a = new(mem) Payload_t(writeLog<decltype(timeStamp), Args...>, std::move(timeStamp), std::move(args)...);
+        [[maybe_unused]]Payload_t* a = new(mem) Payload_t(
+                  writeLog<TimeStamp_t, Args...>
+                , std::forward<TimeStamp_t>(timeStamp)
+                , std::forward<Args>(args)...);
 
-#   ifdef ADD_MARKER
-        _mm_sfence();
-#   endif
+        sfence();
         data.produce(sizeof(Payload_t));
 
         // use RIIA guard?
         data.cleanUpProduce();
     }
-    // */
-    //*
 #elif LOG_CLFLUSHOPT2
     template <typename... Args>
     void userLog (Args&&... args)
     {
         auto timeStamp = __rdtsc();
-        auto f = cbLog<Args...>;
+        using TimeStamp_t = decltype(timeStamp);
+        using Payload_t = Payload<TimeStamp_t, Args...>;
 
-        // Is there a way to encode the function pointer into the tuple and still
-        // properly extract later?
-        [[maybe_unused]]decltype(f)* fp = new(data.pickProduce()) decltype(f)(f);
-        data.produce(sizeof(void*));
+        char* mem = data.pickProduce(sizeof(Payload_t));
+        if (mem == nullptr)
+        {
+            ++logMiss_;
+            return;
+        }
 
-        using Tuple_t = std::tuple<decltype(timeStamp), Args...>;
-
-        // added intermediate copy to be inline with NTS version
-        // This is either as fast or faster than LOG_CLFLUSHOPT1.  Why?????
-        //alignas(8) Tuple_t tmpTuple(timeStamp, args...);
-        alignas(8) Tuple_t tmpTuple(timeStamp, args...);
+        Payload_t tmpPayload(
+                  writeLog<TimeStamp_t, Args...>
+                , std::forward<TimeStamp_t>(timeStamp)
+                , std::forward<Args>(args)...);
 
         // The beauty of placement new!
-        Tuple_t *a = new(data.pickProduce()) Tuple_t(tmpTuple);
-#   ifdef ADD_MARKER
-        _mm_sfence();
-#   endif
-        data.produce(sizeof(*a));
+        [[maybe_unused]]Payload_t* a = new(mem) Payload_t(tmpPayload);
+
+        sfence();
+        data.produce(sizeof(Payload_t));
 
         // use RIIA guard?
         data.cleanUpProduce();
     }
-    // */
 #elif LOG_CLFLUSHOPT3
-    //*
     template <typename... Args>
     void userLog (Args&&... args)
     {
         auto timeStamp = __rdtsc();
-        auto f = cbLog<Args...>;
+        using TimeStamp_t = decltype(timeStamp);
+        using Payload_t = Payload<TimeStamp_t, Args...>;
 
-        // Is there a way to encode the function pointer into the tuple and still
-        // properly extract later?
-        [[maybe_unused]]decltype(f)* fp = new(data.pickProduce()) decltype(f)(f);
-        data.produce(sizeof(void*));
+        char* mem = data.pickProduce(sizeof(Payload_t));
+        if (mem == nullptr)
+        {
+            ++logMiss_;
+            return;
+        }
 
-        using Tuple_t = std::tuple<decltype(timeStamp), Args...>;
+        Payload_t tmpPayload(
+                  writeLog<TimeStamp_t, Args...>
+                , std::forward<TimeStamp_t>(timeStamp)
+                , std::forward<Args>(args)...);
 
-        alignas(8) Tuple_t tmpTuple(timeStamp, args...);
 
-        char* store = data.pickProduce();
+        for (uint32_t i = 0; i < sizeof(Payload_t)/8; ++i)
+            *(reinterpret_cast<uint64_t*>(mem)+i) = *(reinterpret_cast<uint64_t*>(&tmpPayload)+i);
 
-        using fakeIt_t = long long int;
-
-        for (uint32_t i = 0; i < sizeof(tmpTuple)/8; ++i)
-            *(reinterpret_cast<fakeIt_t*>(store)+i) = *(reinterpret_cast<fakeIt_t*>(&tmpTuple)+i);
-#   ifdef ADD_MARKER
-        _mm_sfence();
-#   endif
-        data.produce(sizeof(tmpTuple));
+        sfence();
+        data.produce(sizeof(Payload_t));
 
         // use RIIA guard?
-        //data.cleanUpProduce();
+        data.cleanUpProduce();
     }
-#else
-    //*
+#elif LOG_NTS
     template <typename... Args>
     void userLog (Args&&... args)
     {
         auto timeStamp = __rdtsc();
-        auto f = cbLog<Args...>;
+        using TimeStamp_t = decltype(timeStamp);
+        using Payload_t = Payload<TimeStamp_t, Args...>;
 
-        // Is there a way to encode the function pointer into the tuple and still
-        // properly extract later?
-        //[[maybe_unused]]decltype(f)* fp = new(data.pickProduce()) decltype(f)(f);
-        _mm_stream_si64((long long int*)data.pickProduce(), (intptr_t)(f));
-        data.produce(sizeof(void*));
+        char* mem = data.pickProduce(sizeof(Payload_t));
+        if (mem == nullptr)
+        {
+            ++logMiss_;
+            return;
+        }
 
-        using Tuple_t = std::tuple<decltype(timeStamp), Args...>;
+        Payload_t tmpPayload(
+                  writeLog<TimeStamp_t, Args...>
+                , std::forward<TimeStamp_t>(timeStamp)
+                , std::forward<Args>(args)...);
 
-        alignas(8) Tuple_t tmpTuple(timeStamp, args...);
+        using FakeIt_t = long long int;
 
-        char* store = data.pickProduce();
-        assert(8 == (reinterpret_cast<intptr_t>(store) & 63));
+        for (uint32_t i = 0; i < sizeof(Payload_t)/8; ++i)
+            _mm_stream_si64((reinterpret_cast<FakeIt_t*>(mem)+i), *(reinterpret_cast<FakeIt_t*>(&tmpPayload)+i));
 
-        using fakeIt_t = long long int;
-
-        for (uint32_t i = 0; i < sizeof(tmpTuple)/8; ++i)
-            _mm_stream_si64(reinterpret_cast<fakeIt_t*>(store)+i, *(reinterpret_cast<fakeIt_t*>(&tmpTuple)+i));
-
-#   ifdef ADD_MARKER
-        _mm_sfence();
-#   endif
-
-        data.produce(sizeof(tmpTuple));
+        sfence();
+        data.produce(sizeof(Payload_t));
 
         // use RIIA guard?
         data.cleanUpProduce();
     }
 #endif
-
-    // */
     ///////////////////////////////////////////////////////////////////////////////
-
     // refNumber and heapString bad code, but serve as examples
     uint32_t refNumber{0};
     template <typename... Args>
-    uint64_t testLogs ( int32_t iter, Args... args)
+    uint64_t testLogs ( int32_t iter, Args&&... args)
     {
-        [[maybe_unused]] uint16_t x = 987;
-        // char *heapString = new char[20];
+        char *heapString = new char[20];
 
-        // strncpy(heapString, "This is a heap string", 20);
-        //warmup
-        //for (int i = 0; i < 200; ++i)
-        //    userLog(111, x, "BLEH", x, "fdsa", 222, 0.543, 333, 444, x, "ASDF");
+        strncpy(heapString, "This is a heap string", 20);
 
-        //data.reset();
-
-        uint64_t total{0};
-        auto b = __rdtsc();
+        // need to work on timing (will probably do with new tapping POC, combine the two
+        //uint64_t total{0};
         for (int i = 0; i < iter; ++i)
         {
             refNumber = i;
-            
-            /*
-            userLog(x, 222, 0.543, 333, 0.444, x, "ASDF", i+1, 555, x, 666, "funny", heapString, 'a', 'b', 'c', 'd'); 
-            userLog(x, 222, 0.543, 333, 0.444, x, "ASDF", i+1, 555, x, 666, "funny", heapString, 'a', 'b', 'c', 'd'); 
-            userLog(x, 222, 0.543, 333, 0.444, x, "ASDF", i+1, 555, x, 666, "funny", heapString, 'a', 'b', 'c', 'd'); 
-            userLog(x, 222, 0.543, 333, 0.444, x, "ASDF", i+1, 555, x, 666, "funny", heapString, 'a', 'b', 'c', 'd'); 
-            // */
-
             //*
-            userLog(1ull, 2ull, 3ull, 4ull, 5ull, 6ull);
-            //wait(300'000);
-            //userLog(111, x, "BLEH ACH MEH", x, "fdsa", 222, 0.543, 333, 444, x, "ASDF", i, "jkl;");
-            //userLog("BLEH ACH MEH", x, "fdsa", 222, 0.543, 333, 444, x, "ASDF", i);
-            // about 40 cpu cycles
-            //userLog(x, 222, 0.543, 333, 0.444, x, "ASDF", i+1, 555, x, 666, "funny", heapString, 'a', 'b', 'c', 'd');
-            // about 22 cpu cycles
-            //userLog("args test ", args...);
-            // */
-
-            /*
-            userLog("too funny"); 
-            userLog("too funny"); 
-            userLog("too funny"); 
-            userLog("too funny"); 
+            //auto b = __rdtsc();
+            //userLog("Diff paramters test, num parm ", sizeof...(Args)+4, i, std::ref(refNumber), heapString, args...);
+            userLog("Diff paramters test, num parm ");//, sizeof...(Args)+4, i, std::ref(refNumber), heapString, args...);
+            //auto t = __rdtsc() - b;
+            //std::cerr << "\n" << t/1 << " TTT";
             // */
         }
 
-        total += __rdtsc() - b;
-        return (total/1);
+        //total += __rdtsc() - b;
+        return (0);
     }
 
     uint32_t prntIter_{0};
@@ -473,18 +449,16 @@ public:
 
         while (true)
         {
-            //std::cout << "================" << std::endl;
-            Fctn_t* fctn = (Fctn_t*)(data.pickConsume());
+            void* mem = data.pickConsume();
+            Fctn_t* fctn = (Fctn_t*)(mem);
 
             // Is there a better whay to detect nothing in queue?
-            if (data.pickConsume() == nullptr || fctn == 0)
+            if (mem == 0 || *(int*)mem == 0)
             {
                 //std::cout << "Flushing -- zero!" << std::endl;
                 return;
             }
 
-            //std::cout   << ++iter << " Calling fctn " << (intptr_t)(void*)*fctn
-            //            << " with data " << (intptr_t)data.pickConsume() << " prntIter = " << ++prntIter_ << std::endl;
             (*fctn)(data);
             std::cout << std::endl;
 
@@ -494,31 +468,15 @@ public:
         }
     }
 
-    // not working yet
     void printLogsT ()
     {
-        [[maybe_unused]] uint32_t iter{0};
         while (running_)
-        {
-            //wait(3'000); // 1us
-            //std::cout << "Print logs iter = " << ++iter << std::endl;
             printLogs();
-        }
     }
 };
 
 int main ( int argc, char* argv[] )
 {
-    /*
-    for (int i = 0; i < 100; ++i)
-    {
-        std::cout << "Waiting ..." << std::endl;
-        wait(300'000'000); // 100ms
-    }
-
-    return 0;
-    // */
-
     struct sigaction sa;
 
     memset(&sa, 0, sizeof(struct sigaction));
@@ -563,58 +521,48 @@ int main ( int argc, char* argv[] )
 
     Logger log(loggerCore);
  
-    constexpr int32_t numFctnPtr = 1'000;
+    constexpr int32_t numFctnPtr = 500;
 
     // arguments
     //
     constexpr int32_t numArgs = 20;
-    uint8_t bytes1[numArgs]{0};
-    uint16_t bytes2[numArgs]{1};
-    uint32_t bytes4[numArgs]{2};
-    uint64_t bytes8[numArgs]{3};
-    float fbytes4[numArgs]{0.1};
-    double dbytes8[numArgs]{0.2};
+    [[maybe_unused]]uint8_t bytes1[numArgs]{0};
+    [[maybe_unused]]uint16_t bytes2[numArgs]{1};
+    [[maybe_unused]]uint32_t bytes4[numArgs]{2};
+    [[maybe_unused]]uint64_t bytes8[numArgs]{3};
+    [[maybe_unused]]float fbytes4[numArgs]{1.1};
+    [[maybe_unused]]double dbytes8[numArgs]{1.2};
 
-    const char* tstString1 = "This is an arg test";
+    [[maybe_unused]]const char* tstString1 = "This is an arg test";
     [[maybe_unused]]const char* tstString1a = "This is another arg test";
 
-
+    [[maybe_unused]] uint16_t x = 987;
 
     auto fastPath = [&]()
     {
-        auto time = log.testLogs(numFctnPtr);
-        std::cerr << "Avg Log Time = " << time/numFctnPtr << std::endl;
-        //wait(300'000'000); // 100ms
-        //log.printLogs();
-
-        auto runningAvg = time/numFctnPtr;
+        auto runningAvg{0};
         int i;
-        for (i = 0; i < 2'000; ++i)
+        for (i = 0; i < 400; ++i)
         {
-            time = log.testLogs(numFctnPtr
+            [[maybe_unused]] auto time = log.testLogs(numFctnPtr
+                    , 4ull, x, 2ull, 3ull, 4ull, 5ull, 6ull
                     /*
-                    , bytes1[0]+i, bytes2[0]+i, bytes4[0]+i, bytes8[0]+i, fbytes4[0]+i, dbytes8[0]+i, tstString1[0]
-                    , bytes1[1]+i, bytes2[1]+i, bytes4[1]+i, bytes8[1]+i, fbytes4[1]+i, dbytes8[1]+i, tstString1[1]
-                    , bytes1[2]+i, bytes2[2]+i, bytes4[2]+i, bytes8[2]+i, fbytes4[2]+i, dbytes8[2]+i, tstString1[2]
-                    , bytes1[3]+i, bytes2[3]+i, bytes4[3]+i, bytes8[3]+i, fbytes4[3]+i, dbytes8[3]+i, tstString1[3]
-                    , bytes1[4]+i, bytes2[4]+i, bytes4[4]+i, bytes8[4]+i, fbytes4[4]+i, dbytes8[4]+i, tstString1[4]
-                    , bytes1[5]+i, bytes2[5]+i, bytes4[5]+i, bytes8[5]+i, fbytes4[5]+i, dbytes8[5]+i, tstString1[5]
-                    , bytes1[6]+i, bytes2[6]+i, bytes4[6]+i, bytes8[6]+i, fbytes4[6]+i, dbytes8[6]+i, tstString1[6]
-                    , bytes1[7]+i, bytes2[7]+i, bytes4[7]+i, bytes8[7]+i, fbytes4[7]+i, dbytes8[7]+i, tstString1[7]
-                    , bytes1[8]+i, bytes2[8]+i, bytes4[8]+i, bytes8[8]+i, fbytes4[8]+i, dbytes8[8]+i, tstString1[8]
-                    , bytes1[9]+i, bytes2[9]+i, bytes4[9]+i, bytes8[9]+i, fbytes4[9]+i, dbytes8[9]+i, tstString1a[9]
+                    , bytes1[0]+i, bytes2[1]+i, bytes4[2]+i, bytes8[3]+i, fbytes4[4]+i, dbytes8[5]+i, tstString1
+                    , bytes1[1]+i, bytes2[2]+i, bytes4[3]+i, bytes8[4]+i, fbytes4[5]+i, dbytes8[6]+i, tstString1
+                    , bytes1[2]+i, bytes2[3]+i, bytes4[4]+i, bytes8[5]+i, fbytes4[6]+i, dbytes8[7]+i, tstString1
+                    , bytes1[3]+i, bytes2[4]+i, bytes4[5]+i, bytes8[6]+i, fbytes4[7]+i, dbytes8[8]+i, tstString1
+                    , bytes1[4]+i, bytes2[5]+i, bytes4[6]+i, bytes8[7]+i, fbytes4[8]+i, dbytes8[9]+i, tstString1
+                    , bytes1[5]+i, bytes2[6]+i, bytes4[7]+i, bytes8[8]+i, fbytes4[9]+i, dbytes8[0]+i, tstString1
+                    , bytes1[6]+i, bytes2[7]+i, bytes4[8]+i, bytes8[9]+i, fbytes4[0]+i, dbytes8[1]+i, tstString1
+                    , bytes1[7]+i, bytes2[8]+i, bytes4[9]+i, bytes8[0]+i, fbytes4[1]+i, dbytes8[2]+i, tstString1
+                    , bytes1[8]+i, bytes2[9]+i, bytes4[0]+i, bytes8[1]+i, fbytes4[2]+i, dbytes8[3]+i, tstString1
+                    , bytes1[9]+i, bytes2[0]+i, bytes4[1]+i, bytes8[2]+i, fbytes4[3]+i, dbytes8[4]+i, tstString1a
                     // */
                     );
-            std::cerr << "Avg Log Time = " << time/numFctnPtr << std::endl;
-            //log.printLogs();
-            runningAvg += time/numFctnPtr;
-            // FIXME
-            // avoid overrun (will fix later)
-            // Solution is to have pick methods provide an argument of how much space to use
-            wait(3'000'000); // 100ms
+            //std::cerr << "Avg Log Time = " << time/numFctnPtr << std::endl;
+            //runningAvg += time/numFctnPtr;
+            //wait(9'000'000); // 100ms 
         }
-
-        i += 1;
 
         std::cerr << "runningAvg = " << runningAvg / i << " i " << i << std::endl;
     };
@@ -623,13 +571,10 @@ int main ( int argc, char* argv[] )
     setAffinity(auxFP, auxFPCore);
 #endif
 
-
-
     std::thread fp(fastPath);
     setAffinity(fp, fastPathCore);
-    //wait(300'000'000); // 100ms
-    log.start();
 
+    log.start();
     fp.join();
     log.stop();
 
@@ -638,6 +583,8 @@ int main ( int argc, char* argv[] )
     AuxFastPath::running = 0;
     auxFP.join();
 #endif
+
+    log.dbgPrint();
 
     return 0;
 }
