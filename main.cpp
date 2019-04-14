@@ -41,6 +41,7 @@
 #include <x86intrin.h>
 
 #include "srb.h"
+//#include "mpmc_xadd.h"
 
 void wait ( uint32_t cycles )
 {
@@ -170,7 +171,6 @@ void for_each(Tuple&& t, Func&& f)
 
 template <typename... T>
 using TupleNR_t = std::tuple<typename std::decay<T>::type...>;
-//using TupleNR_t = std::tuple<typename std::remove_reference<T>::type...>;
 
 template <typename... Args>
 struct alignas(8) Payload
@@ -192,7 +192,7 @@ uint64_t writeLog (SimpleRingBuff& srb)
 {
     using Payload_t = Payload<Args...>;
 
-    Payload_t *a = reinterpret_cast<Payload_t*>(srb.pickConsume());
+    Payload_t *a = reinterpret_cast<Payload_t*>(srb.pickConsume(sizeof(Payload_t)));
 
     // this should never happen?
     if (a == nullptr )//|| *(int*)&a->data == 0)
@@ -226,9 +226,6 @@ uint64_t cbLog (SimpleRingBuff& srb)
 {
     using Timestamp_t = int64_t;
     return writeLog<Timestamp_t, Args...>(srb);
-
-
-    //return writeLog<Timestamp_t, typename std::remove_reference<Args>::type...>(srb);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -237,7 +234,7 @@ uint64_t cbLog (SimpleRingBuff& srb)
 class Logger
 {
 public:
-    constexpr static int dataStore{1024*1024*16};
+    constexpr static uint32_t dataStore{1024*1024*1024};
 
 private:
     SimpleRingBuff data;//[dataStore];
@@ -292,11 +289,17 @@ public:
 #   endif
     }
 
-    ///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 #ifdef LOG_CLFLUSHOPT1
+
+    //template <typename... Args>
+    //uint64_t userLog (Args&&... args) __attribute__((flatten));
+
     template <typename... Args>
-    void userLog (Args&&... args)
+    uint64_t userLog (Args&&... args)
     {
+        //uint32_t tsc_aux;
+        //auto timeStamp = __rdtscp(&tsc_aux);
         auto timeStamp = __rdtsc();
         using TimeStamp_t = decltype(timeStamp);
         using Payload_t = Payload<TimeStamp_t, Args...>;
@@ -305,10 +308,17 @@ public:
         if (mem == nullptr)
         {
             ++logMiss_;
-            return;
+            return 0;
         }
 
         // The beauty of placement new!
+        // delete is never needed. A simple structure is created
+        // and memory is reused as ring buffer progresses
+        // no resource leak
+        //
+        // Are there potential edge cases of complex objects
+        // Possibly reference counted?  In this case a destructor
+        // will need to be called!
         [[maybe_unused]]Payload_t* a = new(mem) Payload_t(
                   writeLog<TimeStamp_t, Args...>
                 , std::forward<TimeStamp_t>(timeStamp)
@@ -319,10 +329,11 @@ public:
 
         // use RIIA guard?
         data.cleanUpProduce();
+        return timeStamp;
     }
 #elif LOG_CLFLUSHOPT2
     template <typename... Args>
-    void userLog (Args&&... args)
+    uint64_t userLog (Args&&... args)
     {
         auto timeStamp = __rdtsc();
         using TimeStamp_t = decltype(timeStamp);
@@ -332,7 +343,7 @@ public:
         if (mem == nullptr)
         {
             ++logMiss_;
-            return;
+            return 0;
         }
 
         Payload_t tmpPayload(
@@ -348,10 +359,11 @@ public:
 
         // use RIIA guard?
         data.cleanUpProduce();
+        return timeStamp;
     }
 #elif LOG_CLFLUSHOPT3
     template <typename... Args>
-    void userLog (Args&&... args)
+    uint64_t userLog (Args&&... args)
     {
         auto timeStamp = __rdtsc();
         using TimeStamp_t = decltype(timeStamp);
@@ -361,7 +373,7 @@ public:
         if (mem == nullptr)
         {
             ++logMiss_;
-            return;
+            return 0;
         }
 
         Payload_t tmpPayload(
@@ -378,10 +390,11 @@ public:
 
         // use RIIA guard?
         data.cleanUpProduce();
+        return timeStamp;
     }
 #elif LOG_NTS
     template <typename... Args>
-    void userLog (Args&&... args)
+    uint64_t userLog (Args&&... args)
     {
         auto timeStamp = __rdtsc();
         using TimeStamp_t = decltype(timeStamp);
@@ -391,7 +404,7 @@ public:
         if (mem == nullptr)
         {
             ++logMiss_;
-            return;
+            return 0;
         }
 
         Payload_t tmpPayload(
@@ -409,6 +422,7 @@ public:
 
         // use RIIA guard?
         data.cleanUpProduce();
+        return timeStamp;
     }
 #endif
     ///////////////////////////////////////////////////////////////////////////////
@@ -417,9 +431,9 @@ public:
     template <typename... Args>
     uint64_t testLogs ( int32_t iter, Args&&... args)
     {
-        char *heapString = new char[20];
+        //char *heapString = new char[20];
 
-        strncpy(heapString, "This is a heap string", 20);
+        //strncpy(heapString, "This is a heap string", 20);
 
         // need to work on timing (will probably do with new tapping POC, combine the two
         //uint64_t total{0};
@@ -429,7 +443,8 @@ public:
             //*
             //auto b = __rdtsc();
             //userLog("Diff paramters test, num parm ", sizeof...(Args)+4, i, std::ref(refNumber), heapString, args...);
-            userLog("Diff paramters test, num parm ");//, sizeof...(Args)+4, i, std::ref(refNumber), heapString, args...);
+            userLog("Diff paramters test, num parm ", sizeof...(Args)+3, i, args...);
+            //userLog("Diff paramters test, num parm ");//, sizeof...(Args)+4, i, std::ref(refNumber), heapString, args...);
             //auto t = __rdtsc() - b;
             //std::cerr << "\n" << t/1 << " TTT";
             // */
@@ -459,8 +474,10 @@ public:
                 return;
             }
 
-            (*fctn)(data);
-            std::cout << std::endl;
+            if ((*fctn)(data) > 0)
+                std::cout << std::endl;
+            else
+                return;
 
             // clean up every log to keep cache pollution at minimum
             // use RIIA guard or part of Fctn_t?
@@ -521,7 +538,7 @@ int main ( int argc, char* argv[] )
 
     Logger log(loggerCore);
  
-    constexpr int32_t numFctnPtr = 500;
+    constexpr int32_t iter = 100'000;
 
     // arguments
     //
@@ -538,15 +555,21 @@ int main ( int argc, char* argv[] )
 
     [[maybe_unused]] uint16_t x = 987;
 
+    uint64_t measurements[iter];
+
     auto fastPath = [&]()
     {
-        auto runningAvg{0};
-        int i;
-        for (i = 0; i < 400; ++i)
+        wait(1'000'000'000);
+        int64_t i;
+
+        for (i = 0; i < iter; ++i)
         {
-            [[maybe_unused]] auto time = log.testLogs(numFctnPtr
-                    , 4ull, x, 2ull, 3ull, 4ull, 5ull, 6ull
+            //auto b = __rdtsc();
+            auto b = log.userLog("SPEED TEST"
+                    //,  i, i, i, i, i, i, i, i, i, i
+                    //,  i, i, i, i, i, i, i, i, i, i
                     /*
+                    , "4ull, x, 2ull, x, x, 5ull, 6ull"
                     , bytes1[0]+i, bytes2[1]+i, bytes4[2]+i, bytes8[3]+i, fbytes4[4]+i, dbytes8[5]+i, tstString1
                     , bytes1[1]+i, bytes2[2]+i, bytes4[3]+i, bytes8[4]+i, fbytes4[5]+i, dbytes8[6]+i, tstString1
                     , bytes1[2]+i, bytes2[3]+i, bytes4[4]+i, bytes8[5]+i, fbytes4[6]+i, dbytes8[7]+i, tstString1
@@ -559,24 +582,61 @@ int main ( int argc, char* argv[] )
                     , bytes1[9]+i, bytes2[0]+i, bytes4[1]+i, bytes8[2]+i, fbytes4[3]+i, dbytes8[4]+i, tstString1a
                     // */
                     );
-            //std::cerr << "Avg Log Time = " << time/numFctnPtr << std::endl;
-            //runningAvg += time/numFctnPtr;
-            //wait(9'000'000); // 100ms 
+            //auto tdiff = static_cast<long long int>(__rdtsc() - b);
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), tdiff);
+            measurements[i] = __rdtsc() - b;
+
         }
 
-        std::cerr << "runningAvg = " << runningAvg / i << " i " << i << std::endl;
+        _mm_sfence();
+       
+        std::sort(measurements, &measurements[iter]);
+        /*
+        for (i = 0; i < (int)iter; ++i)
+        {
+            std::cout << measurements[i] << " ";
+        }
+        std::cout << std::endl;
+        // */
+
+        int _50th = (int)((float)iter*0.5);
+        int _90th = (int)((float)iter*0.9);
+        int _95th = (int)((float)iter*0.95);
+        int _96th = (int)((float)iter*0.96);
+        int _97th = (int)((float)iter*0.97);
+        int _98th = (int)((float)iter*0.98);
+        int _99th = (int)((float)iter*0.99);
+        int _999th = (int)((float)iter*0.999);
+        int _9999th = (int)((float)iter*0.9999);
+        int _99999th = (int)((float)iter*0.99999);
+
+        std::cerr << _50th << " 50th " << measurements[_50th] << std::endl;
+        std::cerr << _90th << " 90th " << measurements[_90th] << std::endl;
+        std::cerr << _95th << " 95th " << measurements[_95th] << std::endl;
+        std::cerr << _96th << " 96th " << measurements[_96th] << std::endl;
+        std::cerr << _97th << " 97th " << measurements[_97th] << std::endl;
+        std::cerr << _98th << " 98th " << measurements[_98th] << std::endl;
+        std::cerr << _99th << " 99th " << measurements[_99th] << std::endl;
+        std::cerr << _999th << " 99.9th " << measurements[_999th] << std::endl;
+        std::cerr << _9999th << " 99.99th " << measurements[_9999th] << std::endl;
+        std::cerr << _99999th << " 99.999th " << measurements[_99999th] << std::endl;
+        std::cerr << 0 << " min " << measurements[0] << std::endl;
+        std::cerr << iter-1 << " max " << measurements[iter-1] << std::endl;
+
     };
 #ifdef FP_AUX
     std::thread auxFP(AuxFastPath::auxFastPathLoop);
     setAffinity(auxFP, auxFPCore);
 #endif
+    log.start();
 
     std::thread fp(fastPath);
     setAffinity(fp, fastPathCore);
 
-    log.start();
     fp.join();
+    std::cerr << "Fast path complete" << std::endl;
     log.stop();
+    std::cerr << "log.stop() complete" << std::endl;
 
 #ifdef FP_AUX
     std::cout << "Stopping... " << std::endl;

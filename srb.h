@@ -22,13 +22,13 @@ private:
     RingBuff_t ringBuff0_;
     char* const ringBuff_;
 
-    std::atomic<int32_t> flushedHead_{0};
+    std::atomic<int32_t> atomicHead_{0};
     int32_t head_{0};
-    int32_t lastHead_{0};
+    int32_t lastFlushedHead_{0};
     alignas(64) char x;
-    std::atomic<int32_t> flushedTail_{0};
+    std::atomic<int32_t> atomicTail_{0};
     int32_t tail_{0};
-    int32_t lastTail_{0};
+    int32_t lastFlushedTail_{0};
 
 public:
     void dbgPrint ()
@@ -38,11 +38,11 @@ public:
         std::cout << "Head = " << getHead() << std::endl;
         std::cout << "Tail = " << getTail() << std::endl;
         std::cout << "Diff = " << getHead() - getTail() << std::endl;
-        std::cout << "raw flushedHead = " << (flushedHead_.load()) << std::endl;
-        std::cout << "raw flushedTail = " << (flushedTail_.load()) << std::endl;
-        std::cout << "flushedHead = " << (flushedHead_.load() & ringBuffMask_) << std::endl;
-        std::cout << "flushedTail = " << (flushedTail_.load() & ringBuffMask_) << std::endl;
-        std::cout << "flushed Diff = " << flushedHead_.load() - flushedTail_.load() << std::endl;
+        std::cout << "raw flushedHead = " << (atomicHead_.load()) << std::endl;
+        std::cout << "raw flushedTail = " << (atomicTail_.load()) << std::endl;
+        std::cout << "flushedHead = " << (atomicHead_.load() & ringBuffMask_) << std::endl;
+        std::cout << "flushedTail = " << (atomicTail_.load() & ringBuffMask_) << std::endl;
+        std::cout << "flushed Diff = " << atomicHead_.load() - atomicTail_.load() << std::endl;
         std::cout << "Produce hit = " << fp << ", miss = " << fp_miss << std::endl;
         std::cout << "Consume hit = " << fc << ", miss = " << fc_miss << std::endl;
     }
@@ -60,8 +60,8 @@ public:
         memset(ringBuff_, 0, ringBuffSize_+ringBuffOverflow_);
 
         // eject log memory from cache
-        for (int i = 0; i <ringBuffSize_+ringBuffOverflow_; i+= 64)
-            _mm_clflush(ringBuff_+i);
+        //for (int i = 0; i <ringBuffSize_+ringBuffOverflow_; i+= 64)
+        //    _mm_clflush(ringBuff_+i);
     }
 
     // TODO:FIXME do proper bounds checking later
@@ -70,17 +70,19 @@ public:
 
     int32_t getFreeSpace () 
     {
-        return ringBuffSize_ - (flushedHead_.load(std::memory_order_relaxed) - flushedTail_.load(std::memory_order_relaxed)); 
+        return ringBuffSize_ - (atomicHead_.load(std::memory_order_relaxed) - atomicTail_.load(std::memory_order_relaxed)); 
     }
 
     char* pickProduce (int32_t sz = 0) 
     {
-        auto ft = flushedTail_.load(std::memory_order_acquire); return (head_ - ft > ringBuffSize_ - (128+sz)) ? nullptr : ringBuff_ + getHead(); 
+        auto ft = atomicTail_.load(std::memory_order_acquire); 
+        return (head_ - ft > ringBuffSize_ - (128+sz)) ? nullptr : ringBuff_ + getHead(); 
     }
 
     char* pickConsume (int32_t sz = 0) 
     {
-        auto fh = flushedHead_.load(std::memory_order_acquire); return fh - (tail_+sz) < 1 ? nullptr : ringBuff_ + getTail(); 
+        auto fh = atomicHead_.load(std::memory_order_acquire); 
+        return fh - (tail_+sz) < 1 ? nullptr : ringBuff_ + getTail(); 
     }
 
     void produce ( uint32_t sz ) { head_ += sz; }
@@ -89,70 +91,57 @@ public:
 
     void cleanUp(int32_t& last, int32_t offset)
     {
-#ifdef FP_AUX
+#if defined(FP_AUX) || defined(LOG_NTS)
         return;
 #endif
 
+#if defined(LOG_CLFLUSHOPT1) || defined(LOG_CLFLUSHOPT2) || defined(LOG_CLFLUSHOPT3)
         auto lDiff = last - (last % 64);
         auto cDiff = offset - (offset % 64);
 
         while (cDiff > lDiff)
         {
-            //std::cout << std::endl;
-            //std::cout << "Flushing " << lDiff << " / " << lDiff / 64 << ", current = " 
-            //         << getTail() << ", diff = " << getTail()-lDiff << std::endl;
-            _mm_clflushopt(ringBuff_ + (lDiff & ringBuffMask_)); // 60 - 62 cpu cycles on L29
+            //_mm_clflushopt(ringBuff_ + (lDiff & ringBuffMask_));
 
-            //_mm_clflush(data+lDiff); // 280 cpu cycles on L29
+            //_mm_clflush(data+lDiff);
             
             lDiff += 64;
             last = lDiff;
         }
-        //std::cout << "lastOffset = " << lastHead_ << ", current = " 
-        //          << getHead() << ", diff = " << getHead() - lastHead_ 
-        //          << " cDiff = " << cDiff << ", lDiff = " << lDiff << std::endl;
+#endif
     }
 
     void cleanUpConsume()
     {
-#if defined(LOG_CLFLUSHOPT1) || defined(LOG_CLFLUSHOPT2) || defined(LOG_CLFLUSHOPT3)
-        cleanUp(lastTail_, tail_);
-#endif
+        cleanUp(lastFlushedTail_, tail_);
+
         // consumption is typically on the slow path, don't need this optimization
-        // If T1 is L2 and higher then L3 is untouched!  This is not a speed optimizatoin
-        // but a zero touch L3?
-        //_mm_prefetch(ringBuff_ + getTail()  +(64*4), _MM_HINT_T1); // about 6-7 cpu cycle improvement (@ 10%)
-        // is memory_order_release sufficent?
-        flushedTail_.store(tail_, std::memory_order_release);
+        // is std::memory_order_release sufficent?
+        atomicTail_.store(tail_, std::memory_order_release);
     }
 
     void cleanUpProduce()
     {
-#if defined(LOG_CLFLUSHOPT1) || defined(LOG_CLFLUSHOPT2) || defined(LOG_CLFLUSHOPT3)
-        cleanUp(lastHead_, head_);
-#endif
-        // _MM_HINT_T1 we can avoid polluting L3 alltogether wit T1?
-        _mm_prefetch(ringBuff_ + getHead(64*4), _MM_HINT_T1); // about 6-7 cpu cycle improvement (@ 10%)
-        // is memory_order_release sufficent?
-        flushedHead_.store(head_, std::memory_order_release);
+        cleanUp(lastFlushedHead_, head_);
+
+        // _MM_HINT_T1 we can avoid polluting L3 alltogether wit T1? possibly, load into L2 and L1 
+        // flush soon after, never touches L3?
+        _mm_prefetch(ringBuff_ + getHead(64*4), _MM_HINT_T0); // about 6-7 cpu cycle improvement (@ 10%)
+        _mm_prefetch(ringBuff_ + getHead(64*8), _MM_HINT_T0); // about 6-7 cpu cycle improvement (@ 10%)
+        _mm_prefetch(ringBuff_ + getHead(64*12), _MM_HINT_T0); // about 6-7 cpu cycle improvement (@ 10%)
+        // is std::memory_order_release sufficent?
+        atomicHead_.store(head_, std::memory_order_release);
     }
 
+    // flush methods are for FP_AUX
     void flush(int32_t& last, int32_t offset)
     {
         auto lDiff = last - (last % 64);
         auto cDiff = offset - (offset % 64);
 
-        //std::cerr   << "lastOffset = " << last << ", offset = " << offset 
-        //            << " lDiff = " << lDiff << ", cDiff = " << cDiff
-        //            << std::endl;
-
         while (cDiff > lDiff)
         {
-            //std::cerr << std::endl;
-            //std::cerr << "Flushing " << lDiff << " / " << lDiff / 64 << ", cDiff = " << cDiff
-            //    << ", current = " << getTail() << ", diff = " << getTail()-lDiff << std::endl;
             _mm_clflush(ringBuff_ + (lDiff & ringBuffMask_));
-
             
             lDiff += 64;
             last = lDiff;
@@ -163,29 +152,18 @@ public:
     uint32_t fc_miss{0};
     int32_t flushConsume( int32_t last )
     {
-        auto ft = flushedTail_.load(std::memory_order_acquire);
+        auto ft = atomicTail_.load(std::memory_order_acquire);
         if (ft - last >= 64)
             ++fc;
         else
             ++fc_miss;
-        /*
-        ++fc;
-        if (ft > last)
-            std::cerr << "flushConsume, last = " << last << ", tail = " << ft << ", total " << ft - last << ", CLs " << (ft-last)/64 << ", miss = " << fc_miss << std::endl;
-        else
-            ++fc_miss;
-        // */
 
         if (last >= ft)
             return ft;
 
         flush(last, ft);
-        // consumption is typically on the slow path, don't need this optimization
-        // If T1 is L2 and higher then L3 is untouched!  This is not a speed optimizatoin
-        // but a zero touch L3?
-        _mm_prefetch(ringBuff_ + getTail()  +(64*4), _MM_HINT_T0); // about 6-7 cpu cycle improvement (@ 10%)
-        // is memory_order_release sufficent?
-        flushedTail_.store(last, std::memory_order_release);
+        // is std::memory_order_release sufficent?
+        atomicTail_.store(last, std::memory_order_release);
 
         return ft;
     }
@@ -194,27 +172,18 @@ public:
     uint32_t fp_miss{0};
     int32_t flushProduce( int32_t last )
     {
-        auto fh = flushedHead_.load(std::memory_order_acquire);
+        auto fh = atomicHead_.load(std::memory_order_acquire);
         if (fh - last >= 64)
             ++fp;
         else
             ++fp_miss;
-        /*
-        ++fp;
-        if (fh > last)
-            std::cerr << "flushProduce, last = " << last << ", tail = " << fh << ", total " << fh - last << ", CLs " << (fh-last)/64 << ", miss = " << fp_miss << std::endl;
-        else
-            ++fp_miss;
-
-        if (last >= fh)
-            return fh;
-        // */
 
         flush(last, fh);
-        // _MM_HINT_T1 we can avoid polluting L3 alltogether wit T1?
+        // _MM_HINT_T1 we can avoid polluting L3 alltogether wit T1? possibly, load into L2 and L1 
+        // flush soon after, never touches L3?
         _mm_prefetch(ringBuff_ + getHead(64*4), _MM_HINT_T0); // about 6-7 cpu cycle improvement (@ 10%)
-        // is memory_order_release sufficent?
-        flushedHead_.store(head_, std::memory_order_release);
+        // is std::memory_order_release sufficent?
+        atomicHead_.store(head_, std::memory_order_release);
 
         return fh;
     }
@@ -236,8 +205,8 @@ public:
 
         head_ = 0;
         tail_ = 0;
-        lastHead_ = 0;
-        lastTail_ = 0;
+        lastFlushedHead_ = 0;
+        lastFlushedTail_ = 0;
     }
 };
 
