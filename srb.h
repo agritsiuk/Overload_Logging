@@ -25,7 +25,7 @@ private:
     std::atomic<int32_t> atomicHead_{0};
     int32_t head_{0};
     int32_t lastFlushedHead_{0};
-    alignas(64) char x;
+//    alignas(64) char x;
     std::atomic<int32_t> atomicTail_{0};
     int32_t tail_{0};
     int32_t lastFlushedTail_{0};

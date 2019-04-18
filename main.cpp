@@ -133,7 +133,7 @@ void auxFastPathLoop ( void )
         {
             std::lock_guard<std::mutex> lock(rbGuard_);
             localSRBs = ringBuffers_;
-            rbAdded.store(0, std::memory_order_acquire);
+            rbAdded.store(0, std::memory_order_acquire); // release? FIXME
         }
 
         for (auto i : localSRBs)
@@ -169,24 +169,33 @@ void for_each(Tuple&& t, Func&& f)
     dispatcher([&f,&t](auto idx) { f(std::get<idx>(std::forward<Tuple>(t))); });
 }
 
+// CR-3
+// A type that extracts the underlying types from the r-value 
+// the NR in TUpleNR stands for No Reference
 template <typename... T>
 using TupleNR_t = std::tuple<typename std::decay<T>::type...>;
 
+// CR-4
+// This is the structure that is created in the ringbuffer 
+// It contains the function pointer to the method containgn the 
+// parmater pack type.
 template <typename... Args>
 struct alignas(8) Payload
 {
     using Func_t = uint64_t (*)(SimpleRingBuff&);
-    using Tuple_t = std::tuple<Args...>;
 
     Payload(Func_t f, Args&&... args) : func_(f), data(args...) {  }
+
     Func_t func_;
-    //Tuple_t data;
     TupleNR_t<Args...> data; // construct tuple of values
 };
 
 // for calculating time between debug statements
 uint64_t last{0};
 
+// CR-2
+// Takes the ring buffer as an argument and casts the data to the payload type
+// Which is dfined using the parameter pack Type
 template <typename... Args>
 uint64_t writeLog (SimpleRingBuff& srb)
 {
@@ -221,6 +230,9 @@ uint64_t writeLog (SimpleRingBuff& srb)
 
 ///////////////////////////////////////////////////////////////////////////////
 
+// CR-1 
+// This method cotaions a paramater pack type but no value
+// The type is used to define the tuple in writeLog
 template <typename... Args>
 uint64_t cbLog (SimpleRingBuff& srb)
 {
@@ -295,11 +307,11 @@ public:
     //template <typename... Args>
     //uint64_t userLog (Args&&... args) __attribute__((flatten));
 
+	// CR-5
+	// Constructs the payload using placement new within the ring buffer
     template <typename... Args>
     uint64_t userLog (Args&&... args)
     {
-        //uint32_t tsc_aux;
-        //auto timeStamp = __rdtscp(&tsc_aux);
         auto timeStamp = __rdtsc();
         using TimeStamp_t = decltype(timeStamp);
         using Payload_t = Payload<TimeStamp_t, Args...>;
@@ -574,9 +586,9 @@ int main ( int argc, char* argv[] )
         ++core;
     }
 
-	for (int p = 0; p < 20; ++p )
+	//for (int p = 0; p < 20; ++p )
 	{
-		std::cerr << "Number of args " << p << std::endl;
+		//std::cerr << "Number of args " << p << std::endl;
 		Logger log(loggerCore);
 
 		constexpr int32_t iter = 100'000;
@@ -605,6 +617,7 @@ int main ( int argc, char* argv[] )
 
 			for (i = 0; i < iter; ++i)
 			{
+				/*
 				switch (p)
 				{
 					case 0:
@@ -689,7 +702,8 @@ int main ( int argc, char* argv[] )
 						break;
 
 				}
-				//auto b = __rdtsc();
+			*/
+				auto b = __rdtsc();
 				//auto b = log.userLog("SPEED TEST"
 						//,  i, i, i, i, i, i, i, i, i, i
 						//,  i, i, i, i, i, i, i, i, i, i
@@ -709,7 +723,7 @@ int main ( int argc, char* argv[] )
 						//);
 				//auto tdiff = static_cast<long long int>(__rdtsc() - b);
 				//_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), tdiff);
-				//measurements[i] = __rdtsc() - b;
+				measurements[i] = __rdtsc() - b;
 
 			}
 
