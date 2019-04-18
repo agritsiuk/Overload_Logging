@@ -331,6 +331,44 @@ public:
         data.cleanUpProduce();
         return timeStamp;
     }
+#elif LOG_CLFLUSHOPT_TUPLE
+    template <typename... Args>
+    uint64_t userLog (std::tuple<Args...>&& args)
+    {
+        //uint32_t tsc_aux;
+        //auto timeStamp = __rdtscp(&tsc_aux);
+        auto timeStamp = __rdtsc();
+        using TimeStamp_t = decltype(timeStamp);
+        using Payload_t = Payload<TimeStamp_t, std::tuple<Args...>>;
+
+        char* mem = data.pickProduce(sizeof(Payload_t));
+        if (mem == nullptr)
+        {
+            ++logMiss_;
+            return 0;
+        }
+
+        // The beauty of placement new!
+        // delete is never needed. A simple structure is created
+        // and memory is reused as ring buffer progresses
+        // no resource leak
+        //
+        // Are there potential edge cases of complex objects
+        // Possibly reference counted?  In this case a destructor
+        // will need to be called!
+        [[maybe_unused]]Payload_t* a = new(mem) Payload_t(
+                  writeLog<TimeStamp_t, Args...>
+                , std::forward<TimeStamp_t>(timeStamp)
+                , std::forward<Args>(args)...);
+
+        sfence();
+        data.produce(sizeof(Payload_t));
+
+        // use RIIA guard?
+        data.cleanUpProduce();
+        return timeStamp;
+    }
+
 #elif LOG_CLFLUSHOPT2
     template <typename... Args>
     uint64_t userLog (Args&&... args)
@@ -536,115 +574,205 @@ int main ( int argc, char* argv[] )
         ++core;
     }
 
-    Logger log(loggerCore);
- 
-    constexpr int32_t iter = 100'000;
+	for (int p = 0; p < 20; ++p )
+	{
+		std::cerr << "Number of args " << p << std::endl;
+		Logger log(loggerCore);
 
-    // arguments
-    //
-    constexpr int32_t numArgs = 20;
-    [[maybe_unused]]uint8_t bytes1[numArgs]{0};
-    [[maybe_unused]]uint16_t bytes2[numArgs]{1};
-    [[maybe_unused]]uint32_t bytes4[numArgs]{2};
-    [[maybe_unused]]uint64_t bytes8[numArgs]{3};
-    [[maybe_unused]]float fbytes4[numArgs]{1.1};
-    [[maybe_unused]]double dbytes8[numArgs]{1.2};
+		constexpr int32_t iter = 100'000;
 
-    [[maybe_unused]]const char* tstString1 = "This is an arg test";
-    [[maybe_unused]]const char* tstString1a = "This is another arg test";
+		// arguments
+		//
+		constexpr int32_t numArgs = 20;
+		[[maybe_unused]]uint8_t bytes1[numArgs]{0};
+		[[maybe_unused]]uint16_t bytes2[numArgs]{1};
+		[[maybe_unused]]uint32_t bytes4[numArgs]{2};
+		[[maybe_unused]]uint64_t bytes8[numArgs]{3};
+		[[maybe_unused]]float fbytes4[numArgs]{1.1};
+		[[maybe_unused]]double dbytes8[numArgs]{1.2};
 
-    [[maybe_unused]] uint16_t x = 987;
+		[[maybe_unused]]const char* tstString1 = "This is an arg test";
+		[[maybe_unused]]const char* tstString1a = "This is another arg test";
 
-    uint64_t measurements[iter];
+		[[maybe_unused]] uint16_t x = 987;
 
-    auto fastPath = [&]()
-    {
-        wait(1'000'000'000);
-        int64_t i;
+		uint64_t measurements[iter];
 
-        for (i = 0; i < iter; ++i)
-        {
-            //auto b = __rdtsc();
-            auto b = log.userLog("SPEED TEST"
-                    //,  i, i, i, i, i, i, i, i, i, i
-                    //,  i, i, i, i, i, i, i, i, i, i
-                    /*
-                    , "4ull, x, 2ull, x, x, 5ull, 6ull"
-                    , bytes1[0]+i, bytes2[1]+i, bytes4[2]+i, bytes8[3]+i, fbytes4[4]+i, dbytes8[5]+i, tstString1
-                    , bytes1[1]+i, bytes2[2]+i, bytes4[3]+i, bytes8[4]+i, fbytes4[5]+i, dbytes8[6]+i, tstString1
-                    , bytes1[2]+i, bytes2[3]+i, bytes4[4]+i, bytes8[5]+i, fbytes4[6]+i, dbytes8[7]+i, tstString1
-                    , bytes1[3]+i, bytes2[4]+i, bytes4[5]+i, bytes8[6]+i, fbytes4[7]+i, dbytes8[8]+i, tstString1
-                    , bytes1[4]+i, bytes2[5]+i, bytes4[6]+i, bytes8[7]+i, fbytes4[8]+i, dbytes8[9]+i, tstString1
-                    , bytes1[5]+i, bytes2[6]+i, bytes4[7]+i, bytes8[8]+i, fbytes4[9]+i, dbytes8[0]+i, tstString1
-                    , bytes1[6]+i, bytes2[7]+i, bytes4[8]+i, bytes8[9]+i, fbytes4[0]+i, dbytes8[1]+i, tstString1
-                    , bytes1[7]+i, bytes2[8]+i, bytes4[9]+i, bytes8[0]+i, fbytes4[1]+i, dbytes8[2]+i, tstString1
-                    , bytes1[8]+i, bytes2[9]+i, bytes4[0]+i, bytes8[1]+i, fbytes4[2]+i, dbytes8[3]+i, tstString1
-                    , bytes1[9]+i, bytes2[0]+i, bytes4[1]+i, bytes8[2]+i, fbytes4[3]+i, dbytes8[4]+i, tstString1a
-                    // */
-                    );
-            //auto tdiff = static_cast<long long int>(__rdtsc() - b);
-            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), tdiff);
-            measurements[i] = __rdtsc() - b;
+		auto fastPath = [&]()
+		{
+			wait(1'000'000'000);
+			int64_t i, b;
 
-        }
+			for (i = 0; i < iter; ++i)
+			{
+				switch (p)
+				{
+					case 0:
+						b = log.userLog("SPEED TEST");
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 1:
+						b = log.userLog("SPEED TEST", i);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 2:
+						b = log.userLog("SPEED TEST", i, 2ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 3:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 4:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 5:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 6:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 7:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 8:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 9:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 10:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 11:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 12:
+						b = log.userLog("SPEED TEST", i, 2ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 13:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 14:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 15:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 16:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 17:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 18:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
+						measurements[i] = __rdtsc() - b;
+						break;
+					case 19:
+						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
+						measurements[i] = __rdtsc() - b;
+						break;
 
-        _mm_sfence();
-       
-        std::sort(measurements, &measurements[iter]);
-        /*
-        for (i = 0; i < (int)iter; ++i)
-        {
-            std::cout << measurements[i] << " ";
-        }
-        std::cout << std::endl;
-        // */
+				}
+				//auto b = __rdtsc();
+				//auto b = log.userLog("SPEED TEST"
+						//,  i, i, i, i, i, i, i, i, i, i
+						//,  i, i, i, i, i, i, i, i, i, i
+						/*
+						   , "4ull, x, 2ull, x, x, 5ull, 6ull"
+						   , bytes1[0]+i, bytes2[1]+i, bytes4[2]+i, bytes8[3]+i, fbytes4[4]+i, dbytes8[5]+i, tstString1
+						   , bytes1[1]+i, bytes2[2]+i, bytes4[3]+i, bytes8[4]+i, fbytes4[5]+i, dbytes8[6]+i, tstString1
+						   , bytes1[2]+i, bytes2[3]+i, bytes4[4]+i, bytes8[5]+i, fbytes4[6]+i, dbytes8[7]+i, tstString1
+						   , bytes1[3]+i, bytes2[4]+i, bytes4[5]+i, bytes8[6]+i, fbytes4[7]+i, dbytes8[8]+i, tstString1
+						   , bytes1[4]+i, bytes2[5]+i, bytes4[6]+i, bytes8[7]+i, fbytes4[8]+i, dbytes8[9]+i, tstString1
+						   , bytes1[5]+i, bytes2[6]+i, bytes4[7]+i, bytes8[8]+i, fbytes4[9]+i, dbytes8[0]+i, tstString1
+						   , bytes1[6]+i, bytes2[7]+i, bytes4[8]+i, bytes8[9]+i, fbytes4[0]+i, dbytes8[1]+i, tstString1
+						   , bytes1[7]+i, bytes2[8]+i, bytes4[9]+i, bytes8[0]+i, fbytes4[1]+i, dbytes8[2]+i, tstString1
+						   , bytes1[8]+i, bytes2[9]+i, bytes4[0]+i, bytes8[1]+i, fbytes4[2]+i, dbytes8[3]+i, tstString1
+						   , bytes1[9]+i, bytes2[0]+i, bytes4[1]+i, bytes8[2]+i, fbytes4[3]+i, dbytes8[4]+i, tstString1a
+						// */
+						//);
+				//auto tdiff = static_cast<long long int>(__rdtsc() - b);
+				//_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), tdiff);
+				//measurements[i] = __rdtsc() - b;
 
-        int _50th = (int)((float)iter*0.5);
-        int _90th = (int)((float)iter*0.9);
-        int _95th = (int)((float)iter*0.95);
-        int _96th = (int)((float)iter*0.96);
-        int _97th = (int)((float)iter*0.97);
-        int _98th = (int)((float)iter*0.98);
-        int _99th = (int)((float)iter*0.99);
-        int _999th = (int)((float)iter*0.999);
-        int _9999th = (int)((float)iter*0.9999);
-        int _99999th = (int)((float)iter*0.99999);
+			}
 
-        std::cerr << _50th << " 50th " << measurements[_50th] << std::endl;
-        std::cerr << _90th << " 90th " << measurements[_90th] << std::endl;
-        std::cerr << _95th << " 95th " << measurements[_95th] << std::endl;
-        std::cerr << _96th << " 96th " << measurements[_96th] << std::endl;
-        std::cerr << _97th << " 97th " << measurements[_97th] << std::endl;
-        std::cerr << _98th << " 98th " << measurements[_98th] << std::endl;
-        std::cerr << _99th << " 99th " << measurements[_99th] << std::endl;
-        std::cerr << _999th << " 99.9th " << measurements[_999th] << std::endl;
-        std::cerr << _9999th << " 99.99th " << measurements[_9999th] << std::endl;
-        std::cerr << _99999th << " 99.999th " << measurements[_99999th] << std::endl;
-        std::cerr << 0 << " min " << measurements[0] << std::endl;
-        std::cerr << iter-1 << " max " << measurements[iter-1] << std::endl;
+			_mm_sfence();
 
-    };
+			std::sort(measurements, &measurements[iter]);
+			/*
+			   for (i = 0; i < (int)iter; ++i)
+			   {
+			   std::cout << measurements[i] << " ";
+			   }
+			   std::cout << std::endl;
+			// */
+
+			int _50th = (int)((float)iter*0.5);
+			int _90th = (int)((float)iter*0.9);
+			int _95th = (int)((float)iter*0.95);
+			int _96th = (int)((float)iter*0.96);
+			int _97th = (int)((float)iter*0.97);
+			int _98th = (int)((float)iter*0.98);
+			int _99th = (int)((float)iter*0.99);
+			int _999th = (int)((float)iter*0.999);
+			int _9999th = (int)((float)iter*0.9999);
+			int _99999th = (int)((float)iter*0.99999);
+
+			std::cerr << _50th << " 50th " << measurements[_50th] << std::endl;
+			std::cerr << _90th << " 90th " << measurements[_90th] << std::endl;
+			std::cerr << _95th << " 95th " << measurements[_95th] << std::endl;
+			std::cerr << _96th << " 96th " << measurements[_96th] << std::endl;
+			std::cerr << _97th << " 97th " << measurements[_97th] << std::endl;
+			std::cerr << _98th << " 98th " << measurements[_98th] << std::endl;
+			std::cerr << _99th << " 99th " << measurements[_99th] << std::endl;
+			std::cerr << _999th << " 99.9th " << measurements[_999th] << std::endl;
+			std::cerr << _9999th << " 99.99th " << measurements[_9999th] << std::endl;
+			std::cerr << _99999th << " 99.999th " << measurements[_99999th] << std::endl;
+			std::cerr << 0 << " min " << measurements[0] << std::endl;
+			std::cerr << iter-1 << " max " << measurements[iter-1] << std::endl;
+
+		};
 #ifdef FP_AUX
-    std::thread auxFP(AuxFastPath::auxFastPathLoop);
-    setAffinity(auxFP, auxFPCore);
+		std::thread auxFP(AuxFastPath::auxFastPathLoop);
+		setAffinity(auxFP, auxFPCore);
 #endif
-    log.start();
+		log.start();
 
-    std::thread fp(fastPath);
-    setAffinity(fp, fastPathCore);
+		std::thread fp(fastPath);
+		setAffinity(fp, fastPathCore);
 
-    fp.join();
-    std::cerr << "Fast path complete" << std::endl;
-    log.stop();
-    std::cerr << "log.stop() complete" << std::endl;
+		fp.join();
+		std::cerr << "Fast path complete" << std::endl;
+		log.stop();
+		std::cerr << "log.stop() complete" << std::endl;
 
 #ifdef FP_AUX
-    std::cout << "Stopping... " << std::endl;
-    AuxFastPath::running = 0;
-    auxFP.join();
+		std::cout << "Stopping... " << std::endl;
+		AuxFastPath::running = 0;
+		auxFP.join();
 #endif
 
-    log.dbgPrint();
+		log.dbgPrint();
+
+		std::cerr << "--------------- END RUN ----------------" << std::endl;
+	}
 
     return 0;
 }
