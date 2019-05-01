@@ -172,58 +172,80 @@ void for_each(Tuple&& t, Func&& f)
 }
 
 // CR-3
-// A type that extracts the underlying types from the r-value 
-// the NR in TUpleNR stands for No Reference
+// A type that extracts the underlying types from
+// the r-value 
+// the NR in TUpleNR means No Reference
 template <typename... T>
-using TupleNR_t = std::tuple<typename std::decay<T>::type...>;
+using TupleNR_t = std::tuple 
+            <typename std::decay<T>::type...>;
 
 // CR-4
-// This is the structure that is created in the ringbuffer 
-// It contains the function pointer to the method containgn the 
-// parmater pack type.
+// This is the structure that is created in the
+// ringbuffer 
+// It contains the function pointer to the method
+// containing the parmater pack type.
+// Aligned to pointer size
 template <typename... Args>
 struct alignas(8) Payload
 {
     using Func_t = uint64_t (*)(RingBuff&);
 
-    Payload(Func_t f, Args&&... args) : func_(f), data(args...) {  }
+    Payload(Func_t f, Args&&... args) 
+      : func_(f)
+      , data(args...) {}
 
     Func_t func_;
-    TupleNR_t<Args...> data; // construct tuple of values
+    TupleNR_t<Args...> data;
 };
 
 // for calculating time between debug statements
 uint64_t last{0};
 
 // CR-2
-// Takes the ring buffer as an argument and casts the data to the payload type
-// Which is dfined using the parameter pack Type
+// Takes the ring buffer as an argument and casts
+// the data to the payload type
+// dfined using the parameter pack Type
+// seralizes payload to disk.
+// This is not intended for production use
+// but demonstrate functionality.
 template <typename... Args>
 uint64_t writeLog (RingBuff& srb)
 {
     using Payload_t = Payload<Args...>;
 
-    Payload_t *a = reinterpret_cast<Payload_t*>(srb.pickConsume(sizeof(Payload_t)));
+    Payload_t *a = 
+      reinterpret_cast<Payload_t*>(
+            srb.pickConsume(sizeof(Payload_t)));
 
-    // this should never happen?
-    if (a == nullptr )//|| *(int*)&a->data == 0)
+    if (a == nullptr )
         return 0;
 
+    // detect empty parameter pack
     if constexpr(sizeof...(Args) != 0)
     {
-        //std::cout << static_cast<float>(srb.getFreeSpace())/(1024*1024) << " ";
-        // first element is timestamp, this is temporary to caluclate cycles between calls
-        std::cout << std::get<0>(a->data) - last << " ";
+        std::cout << std::get<0>(a->data) 
+          - last << " ";
+        
+        // debugging purposes
         last = std::get<0>(a->data);
 
-        // TODO? rework for printf style output using first argument of tuple as string?
-        for_each(a->data, [] (const auto& t) { std::cout << t << " ";});
+        // TODO? rework for printf style output
+        // using first argument of tuple as
+        // string?  
+        // For development purposes we use
+        // exploding tuples
+        // https://blog.tartanllama.xyz/exploding-tuples-fold-expressions/
+        for_each(a->data, [] (const auto& t) 
+            { std::cout << t << " ";});
 
-        std::cout << " sizeof Payload = " << sizeof(Payload_t) << " ";
+        std::cout << " sizeof Payload = " 
+          << sizeof(Payload_t) << " ";
 
+        // properly deconstruct, may have 
+        // complex objects
+        a->~Payload_t();
         memset((char*)a, 0, sizeof(Payload_t));
 
-        std::cout << " after memset, " << (intptr_t)a->func_;
         srb.consume(sizeof(Payload_t));
     }
 
@@ -233,8 +255,12 @@ uint64_t writeLog (RingBuff& srb)
 ///////////////////////////////////////////////////////////////////////////////
 
 // CR-1 
-// This method cotaions a paramater pack type but no value
-// The type is used to define the tuple in writeLog
+// This method cotaions a paramater pack type 
+// however, no value
+// The type is used to define the tuple in
+// writeLog.
+// We are using the paramater pack to define
+// data structures 
 template <typename... Args>
 uint64_t cbLog (RingBuff& srb)
 {
@@ -311,40 +337,36 @@ public:
 
 	// CR-5
 	// Constructs the payload using placement new within the ring buffer
-    template <typename... Args>
-    uint64_t userLog (Args&&... args)
-    {
-        auto timeStamp = __rdtsc();
-        using TimeStamp_t = decltype(timeStamp);
-        using Payload_t = Payload<TimeStamp_t, Args...>;
+template <typename... Args>
+uint64_t userLog (Args&&... args)
+{
+  auto timeStamp = __rdtsc();
+  using TimeStamp_t = decltype(timeStamp);
+  using Payload_t = Payload<TimeStamp_t, Args...>;
 
-        char* mem = data.pickProduce(sizeof(Payload_t));
-        if (mem == nullptr)
-        {
-            ++logMiss_;
-            return 0;
-        }
+  char* mem = data.pickProduce(sizeof(Payload_t));
+  if (mem == nullptr)
+  {
+    ++logMiss_;
+    return 0;
+  }
 
-        // The beauty of placement new!
-        // delete is never needed. A simple structure is created
-        // and memory is reused as ring buffer progresses
-        // no resource leak
-        //
-        // Are there potential edge cases of complex objects
-        // Possibly reference counted?  In this case a destructor
-        // will need to be called!
-        [[maybe_unused]]Payload_t* a = new(mem) Payload_t(
-                  writeLog<TimeStamp_t, Args...>
-                , std::forward<TimeStamp_t>(timeStamp)
-                , std::forward<Args>(args)...);
+  // The beauty of placement new!
+  // A simple structure is created
+  // and memory is reused as ring buffer
+  // progresses
+  [[maybe_unused]]Payload_t* a = new(mem) 
+    Payload_t(
+      writeLog<TimeStamp_t, Args...>
+      , std::forward<TimeStamp_t>(timeStamp)
+      , std::forward<Args>(args)...);
 
-        //sfence();
-        data.produce(sizeof(Payload_t));
+  data.produce(sizeof(Payload_t));
 
-        // use RIIA guard?
-        data.cleanUpProduce();
-        return timeStamp;
-    }
+  // use RIIA guar for cleanupd?
+  data.cleanUpProduce();
+  return timeStamp;
+}
 #elif LOG_CLFLUSHOPT_TUPLE
     template <typename... Args>
     uint64_t userLog (std::tuple<Args...>&& args)
@@ -588,7 +610,7 @@ int main ( int argc, char* argv[] )
         ++core;
     }
 
-	for (int p = 0; p < 1; ++p )
+	for (int p = 0; p < 20; ++p )
 	{
 	    std::cerr << "Number of args " << p << std::endl;
 		Logger log(loggerCore);
@@ -619,9 +641,9 @@ int main ( int argc, char* argv[] )
 
 			for (i = 0; i < iter; ++i)
 			{
-                b = log.userLog("SPEED TEST");
-                measurements[i] = __rdtsc() - b;
-				/*
+                //b = log.userLog("SPEED TEST");
+                //measurements[i] = __rdtsc() - b;
+				//*
 				switch (p)
 				{
 					case 0:
