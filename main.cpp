@@ -1,4 +1,4 @@
-///////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
 // Compile time options
 //
 // Used for different log encoding methodologies
@@ -79,11 +79,11 @@ void setAffinity(
 
 ///////////////////////////////////////////////////////////////////////////////
 // used to debug a few segfaults.
-SimpleRingBuff* pSRB{nullptr};
+RingBuff* pSRB{nullptr};
 void segfault_sigaction(int signal, siginfo_t *si, void *arg)
 {
     std::cout << "***** Caught segfault at address " << (intptr_t)si->si_addr << std::endl;
-    pSRB->dbgPrint();
+    //pSRB->dbgPrint();
     exit(0);
 }
 
@@ -93,11 +93,11 @@ namespace AuxFastPath
 std::atomic<uint32_t> rbAdded{0};
 std::atomic<uint32_t> running{1};
 
-using SRBVec_t = std::vector<SimpleRingBuff*>;
+using SRBVec_t = std::vector<RingBuff*>;
 SRBVec_t ringBuffers_;
 std::mutex rbGuard_;
 
-void addRingBuff (SimpleRingBuff& srb)
+void addRingBuff (RingBuff& srb)
 {
     { // scope the lock guard
     std::lock_guard<std::mutex> lock(rbGuard_);
@@ -107,7 +107,8 @@ void addRingBuff (SimpleRingBuff& srb)
     rbAdded.store(1, std::memory_order_acquire);
 }
 
-void rbCleanup ( SimpleRingBuff& srb, int32_t& lastHead, int32_t& lastTail )
+/*
+void rbCleanup ( RingBuff& srb, int32_t& lastHead, int32_t& lastTail )
 {
     lastHead = srb.flushProduce(lastHead);
     lastTail = srb.flushConsume(lastTail);
@@ -144,6 +145,7 @@ void auxFastPathLoop ( void )
         //wait(300);
     }
 }
+*/
 
 }
 ///////////////////////////////////////////////////////////////////////////////
@@ -182,7 +184,7 @@ using TupleNR_t = std::tuple<typename std::decay<T>::type...>;
 template <typename... Args>
 struct alignas(8) Payload
 {
-    using Func_t = uint64_t (*)(SimpleRingBuff&);
+    using Func_t = uint64_t (*)(RingBuff&);
 
     Payload(Func_t f, Args&&... args) : func_(f), data(args...) {  }
 
@@ -197,7 +199,7 @@ uint64_t last{0};
 // Takes the ring buffer as an argument and casts the data to the payload type
 // Which is dfined using the parameter pack Type
 template <typename... Args>
-uint64_t writeLog (SimpleRingBuff& srb)
+uint64_t writeLog (RingBuff& srb)
 {
     using Payload_t = Payload<Args...>;
 
@@ -209,7 +211,7 @@ uint64_t writeLog (SimpleRingBuff& srb)
 
     if constexpr(sizeof...(Args) != 0)
     {
-        std::cout << static_cast<float>(srb.getFreeSpace())/(1024*1024) << " ";
+        //std::cout << static_cast<float>(srb.getFreeSpace())/(1024*1024) << " ";
         // first element is timestamp, this is temporary to caluclate cycles between calls
         std::cout << std::get<0>(a->data) - last << " ";
         last = std::get<0>(a->data);
@@ -219,7 +221,7 @@ uint64_t writeLog (SimpleRingBuff& srb)
 
         std::cout << " sizeof Payload = " << sizeof(Payload_t) << " ";
 
-        memset(a, 0, sizeof(Payload_t));
+        memset((char*)a, 0, sizeof(Payload_t));
 
         std::cout << " after memset, " << (intptr_t)a->func_;
         srb.consume(sizeof(Payload_t));
@@ -234,7 +236,7 @@ uint64_t writeLog (SimpleRingBuff& srb)
 // This method cotaions a paramater pack type but no value
 // The type is used to define the tuple in writeLog
 template <typename... Args>
-uint64_t cbLog (SimpleRingBuff& srb)
+uint64_t cbLog (RingBuff& srb)
 {
     using Timestamp_t = int64_t;
     return writeLog<Timestamp_t, Args...>(srb);
@@ -249,7 +251,7 @@ public:
     constexpr static uint32_t dataStore{1024*1024*1024};
 
 private:
-    SimpleRingBuff data;//[dataStore];
+    RingBuff data;//[dataStore];
 
     uint32_t loggerCore_{0};
     uint32_t logMiss_{0};
@@ -290,7 +292,7 @@ public:
 
     void dbgPrint()
     {
-        data.dbgPrint();
+        //data.dbgPrint();
         std::cout << "Missed Logs " << logMiss_ << std::endl;
     }
 
@@ -336,7 +338,7 @@ public:
                 , std::forward<TimeStamp_t>(timeStamp)
                 , std::forward<Args>(args)...);
 
-        sfence();
+        //sfence();
         data.produce(sizeof(Payload_t));
 
         // use RIIA guard?
@@ -508,7 +510,7 @@ public:
 
     void printLogs ()
     {
-        using Fctn_t = uint64_t (*)(SimpleRingBuff& p);
+        using Fctn_t = uint64_t (*)(RingBuff& p);
 
         [[maybe_unused]] uint32_t iter{0};
 
@@ -586,9 +588,9 @@ int main ( int argc, char* argv[] )
         ++core;
     }
 
-	//for (int p = 0; p < 20; ++p )
+	for (int p = 0; p < 1; ++p )
 	{
-		//std::cerr << "Number of args " << p << std::endl;
+	    std::cerr << "Number of args " << p << std::endl;
 		Logger log(loggerCore);
 
 		constexpr int32_t iter = 100'000;
@@ -613,10 +615,12 @@ int main ( int argc, char* argv[] )
 		auto fastPath = [&]()
 		{
 			wait(1'000'000'000);
-			int64_t i, b;
+			int64_t i{0}, b{0};
 
 			for (i = 0; i < iter; ++i)
 			{
+                b = log.userLog("SPEED TEST");
+                measurements[i] = __rdtsc() - b;
 				/*
 				switch (p)
 				{
@@ -702,8 +706,8 @@ int main ( int argc, char* argv[] )
 						break;
 
 				}
-			*/
-				auto b = __rdtsc();
+			// */
+				//auto b = __rdtsc();
 				//auto b = log.userLog("SPEED TEST"
 						//,  i, i, i, i, i, i, i, i, i, i
 						//,  i, i, i, i, i, i, i, i, i, i
@@ -723,7 +727,7 @@ int main ( int argc, char* argv[] )
 						//);
 				//auto tdiff = static_cast<long long int>(__rdtsc() - b);
 				//_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), tdiff);
-				measurements[i] = __rdtsc() - b;
+				//measurements[i] = __rdtsc() - b;
 
 			}
 
@@ -782,8 +786,6 @@ int main ( int argc, char* argv[] )
 		AuxFastPath::running = 0;
 		auxFP.join();
 #endif
-
-		log.dbgPrint();
 
 		std::cerr << "--------------- END RUN ----------------" << std::endl;
 	}
