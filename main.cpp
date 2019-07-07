@@ -47,7 +47,6 @@
 //#include "mpmc_xadd.h"
 
 
-using TimeStamp_t = uint64_t;
 
 void wait ( uint32_t cycles )
 {
@@ -268,6 +267,9 @@ uint64_t writeLog (RingBuff& srb)
 // writeLog.
 // We are using the paramater pack to define
 // data structures 
+
+using TimeStamp_t = uint64_t;
+
 template <typename... Args>
 uint64_t cbLog (RingBuff& srb)
 {
