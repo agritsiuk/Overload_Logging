@@ -31,6 +31,7 @@
 #include <tuple>
 #include <mutex>
 #include <type_traits>
+#include <algorithm>
 
 #include <assert.h>
 #include <unistd.h>
@@ -41,7 +42,12 @@
 #include <x86intrin.h>
 
 #include "srb.h"
+#include "srb_test.h"
+
 //#include "mpmc_xadd.h"
+
+
+using TimeStamp_t = uint64_t;
 
 void wait ( uint32_t cycles )
 {
@@ -235,6 +241,7 @@ uint64_t writeLog (RingBuff& srb)
         // For development purposes we use
         // exploding tuples
         // https://blog.tartanllama.xyz/exploding-tuples-fold-expressions/
+        
         for_each(a->data, [] (const auto& t) 
             { std::cout << t << " ";});
 
@@ -264,8 +271,7 @@ uint64_t writeLog (RingBuff& srb)
 template <typename... Args>
 uint64_t cbLog (RingBuff& srb)
 {
-    using Timestamp_t = int64_t;
-    return writeLog<Timestamp_t, Args...>(srb);
+    return writeLog<TimeStamp_t, Args...>(srb);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -341,7 +347,6 @@ template <typename... Args>
 uint64_t userLog (Args&&... args)
 {
   auto timeStamp = __rdtsc();
-  using TimeStamp_t = decltype(timeStamp);
   using Payload_t = Payload<TimeStamp_t, Args...>;
 
   char* mem = data.pickProduce(sizeof(Payload_t));
@@ -374,7 +379,6 @@ uint64_t userLog (Args&&... args)
         //uint32_t tsc_aux;
         //auto timeStamp = __rdtscp(&tsc_aux);
         auto timeStamp = __rdtsc();
-        using TimeStamp_t = decltype(timeStamp);
         using Payload_t = Payload<TimeStamp_t, std::tuple<Args...>>;
 
         char* mem = data.pickProduce(sizeof(Payload_t));
@@ -410,7 +414,6 @@ uint64_t userLog (Args&&... args)
     uint64_t userLog (Args&&... args)
     {
         auto timeStamp = __rdtsc();
-        using TimeStamp_t = decltype(timeStamp);
         using Payload_t = Payload<TimeStamp_t, Args...>;
 
         char* mem = data.pickProduce(sizeof(Payload_t));
@@ -440,7 +443,6 @@ uint64_t userLog (Args&&... args)
     uint64_t userLog (Args&&... args)
     {
         auto timeStamp = __rdtsc();
-        using TimeStamp_t = decltype(timeStamp);
         using Payload_t = Payload<TimeStamp_t, Args...>;
 
         char* mem = data.pickProduce(sizeof(Payload_t));
@@ -471,7 +473,6 @@ uint64_t userLog (Args&&... args)
     uint64_t userLog (Args&&... args)
     {
         auto timeStamp = __rdtsc();
-        using TimeStamp_t = decltype(timeStamp);
         using Payload_t = Payload<TimeStamp_t, Args...>;
 
         char* mem = data.pickProduce(sizeof(Payload_t));
@@ -549,9 +550,16 @@ uint64_t userLog (Args&&... args)
             }
 
             if ((*fctn)(data) > 0)
+            {
+              ++iter;
                 std::cout << std::endl;
+            }
             else
-                return;
+            {
+              if (iter != 0)
+                std::cerr << "Iteration = " << iter << std::endl;
+              return;
+            }
 
             // clean up every log to keep cache pollution at minimum
             // use RIIA guard or part of Fctn_t?
@@ -602,6 +610,11 @@ int main ( int argc, char* argv[] )
             std::cout << core << ":A ";
             auxFPCore = core;
         }
+        else if (i == 't')
+        {
+          testSRB();
+          return 0;
+        }
         else
         {
             std::cout << core << ":N ";
@@ -648,86 +661,107 @@ int main ( int argc, char* argv[] )
 				{
 					case 0:
 						b = log.userLog("SPEED TEST");
-						measurements[i] = __rdtsc() - b;
+            // NTS intereacting with CLFLUSHOPT!!!!
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 1:
 						b = log.userLog("SPEED TEST", i);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 2:
 						b = log.userLog("SPEED TEST", i, 2ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 3:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 4:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 5:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 6:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 7:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 8:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 9:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 10:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 11:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 12:
 						b = log.userLog("SPEED TEST", i, 2ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 13:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 14:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
-						measurements[i] = __rdtsc() - b;
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 15:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 16:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 17:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 18:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 					case 19:
 						b = log.userLog("SPEED TEST", i, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull);
-						measurements[i] = __rdtsc() - b;
+            //_mm_stream_si64(reinterpret_cast<long long int*>(measurements+i), __rdtsc() - b);
+            measurements[i] = __rdtsc() - b;
 						break;
 
 				}
+        //wait(2500);
 			// */
 				//auto b = __rdtsc();
 				//auto b = log.userLog("SPEED TEST"
