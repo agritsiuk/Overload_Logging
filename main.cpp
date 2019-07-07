@@ -192,7 +192,7 @@ using TupleNR_t = std::tuple
 // containing the parmater pack type.
 // Aligned to pointer size
 template <typename... Args>
-struct alignas(8) Payload
+struct alignas(sizeof(void*)) Payload
 {
     using Func_t = uint64_t (*)(RingBuff&);
 
