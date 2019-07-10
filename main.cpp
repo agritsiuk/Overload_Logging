@@ -184,6 +184,33 @@ template <typename... T>
 using TupleNR_t = std::tuple 
             <typename std::decay<T>::type...>;
 
+///////////////////////////////////////////////////////////////////////////////
+template <typename... Args>
+class NOPArchive
+{
+public:
+  void seralize(TupleNR_t<Args...> &a) {}
+};
+
+template <typename... Args>
+class ETArchive
+{
+public:
+  void seralize(TupleNR_t<Args...> &a)
+  {
+    // exploding tuples
+    for_each(a, [] (const auto& t) 
+        { std::cout << t << " ";});
+
+    std::cout << " sizeof TupleNR_t = " 
+      << sizeof(TupleNR_t<Args...>) << " ";
+  }
+};
+
+template <typename... Args>
+using Archiver_t = ETArchive<Args...>;
+//using Archiver_t = NOPArchive<Args...>;
+
 // CR-4
 // This is the structure that is created in the
 // ringbuffer 
@@ -213,49 +240,33 @@ uint64_t last{0};
 // seralizes payload to disk.
 // This is not intended for production use
 // but demonstrate functionality.
-template <typename... Args>
+template <template<typename> typename A, typename... Args>
 uint64_t writeLog (RingBuff& srb)
 {
-    using Payload_t = Payload<Args...>;
+  using Payload_t = Payload<Args...>;
 
-    Payload_t *a = 
-      reinterpret_cast<Payload_t*>(
-            srb.pickConsume(sizeof(Payload_t)));
+  A<Args...> arch;
 
-    if (a == nullptr )
-        return 0;
+  Payload_t *a = 
+    reinterpret_cast<Payload_t*>(
+        srb.pickConsume(sizeof(Payload_t)));
 
-    // detect empty parameter pack
-    if constexpr(sizeof...(Args) != 0)
-    {
-        std::cout << std::get<0>(a->data) 
-          - last << " ";
-        
-        // debugging purposes
-        last = std::get<0>(a->data);
+  if (a == nullptr )
+    return 0;
 
-        // TODO? rework for printf style output
-        // using first argument of tuple as
-        // string?  
-        // For development purposes we use
-        // exploding tuples
-        // https://blog.tartanllama.xyz/exploding-tuples-fold-expressions/
-        
-        for_each(a->data, [] (const auto& t) 
-            { std::cout << t << " ";});
+  // detect empty parameter pack
+  if constexpr(sizeof...(Args) != 0)
+  {
+    arch.seralize(a->data);
+    // properly deconstruct, may have 
+    // complex objects
+    a->~Payload_t();
+    memset((char*)a, 0, sizeof(Payload_t));
 
-        std::cout << " sizeof Payload = " 
-          << sizeof(Payload_t) << " ";
+    srb.consume(sizeof(Payload_t));
+  }
 
-        // properly deconstruct, may have 
-        // complex objects
-        a->~Payload_t();
-        memset((char*)a, 0, sizeof(Payload_t));
-
-        srb.consume(sizeof(Payload_t));
-    }
-
-    return sizeof(Payload_t);
+  return sizeof(Payload_t);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -269,12 +280,6 @@ uint64_t writeLog (RingBuff& srb)
 // data structures 
 
 using TimeStamp_t = uint64_t;
-
-template <typename... Args>
-uint64_t cbLog (RingBuff& srb)
-{
-    return writeLog<TimeStamp_t, Args...>(srb);
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
@@ -343,8 +348,8 @@ public:
     //template <typename... Args>
     //uint64_t userLog (Args&&... args) __attribute__((flatten));
 
-	// CR-5
-	// Constructs the payload using placement new within the ring buffer
+// CR-5
+// Constructs the payload using placement new within the ring buffer
 template <typename... Args>
 uint64_t userLog (Args&&... args)
 {
@@ -364,7 +369,7 @@ uint64_t userLog (Args&&... args)
   // progresses
   [[maybe_unused]]Payload_t* a = new(mem) 
     Payload_t(
-      writeLog<TimeStamp_t, Args...>
+      writeLog<Archiver_t, TimeStamp_t, Args...>
       , std::forward<TimeStamp_t>(timeStamp)
       , std::forward<Args>(args)...);
 
@@ -399,7 +404,7 @@ uint64_t userLog (Args&&... args)
         // Possibly reference counted?  In this case a destructor
         // will need to be called!
         [[maybe_unused]]Payload_t* a = new(mem) Payload_t(
-                  writeLog<TimeStamp_t, Args...>
+                writeLog<Archiver_t, TimeStamp_t, Args...>
                 , std::forward<TimeStamp_t>(timeStamp)
                 , std::forward<Args>(args)...);
 
@@ -426,7 +431,7 @@ uint64_t userLog (Args&&... args)
         }
 
         Payload_t tmpPayload(
-                  writeLog<TimeStamp_t, Args...>
+                  writeLog<Archiver_t, TimeStamp_t, Args...>
                 , std::forward<TimeStamp_t>(timeStamp)
                 , std::forward<Args>(args)...);
 
@@ -455,7 +460,7 @@ uint64_t userLog (Args&&... args)
         }
 
         Payload_t tmpPayload(
-                  writeLog<TimeStamp_t, Args...>
+                writeLog<Archiver_t, TimeStamp_t, Args...>
                 , std::forward<TimeStamp_t>(timeStamp)
                 , std::forward<Args>(args)...);
 
@@ -485,7 +490,7 @@ uint64_t userLog (Args&&... args)
         }
 
         Payload_t tmpPayload(
-                  writeLog<TimeStamp_t, Args...>
+                writeLog<Archiver_t, TimeStamp_t, Args...>
                 , std::forward<TimeStamp_t>(timeStamp)
                 , std::forward<Args>(args)...);
 
