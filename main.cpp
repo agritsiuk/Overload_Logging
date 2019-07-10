@@ -157,26 +157,6 @@ void auxFastPathLoop ( void )
 ///////////////////////////////////////////////////////////////////////////////
 
 
-template <std::size_t... Idx>
-auto make_index_dispatcher(std::index_sequence<Idx...>) 
-{
-    return [] (auto&& f) { (f(std::integral_constant<std::size_t,Idx>{}), ...); };
-}
-
-template <std::size_t N>
-auto make_index_dispatcher() 
-{
-    return make_index_dispatcher(std::make_index_sequence<N>{}); 
-}
-
-template <typename Tuple, typename Func>
-void for_each(Tuple&& t, Func&& f) 
-{
-    constexpr auto n = std::tuple_size<std::decay_t<Tuple>>::value;
-    auto dispatcher = make_index_dispatcher<n>();
-    dispatcher([&f,&t](auto idx) { f(std::get<idx>(std::forward<Tuple>(t))); });
-}
-
 // CR-3
 // A type that extracts the underlying types from
 // the r-value 
@@ -194,34 +174,20 @@ public:
 };
 
 template <typename... Args>
-class ETArchive
+class coutArchive
 {
 public:
   void seralize(TupleNR_t<Args...> &a)
   {
-    // exploding tuples
-    for_each(a, [] (const auto& t) 
-        { std::cout << t << " ";});
-
+    std::apply([](auto&&... args) 
+        {((std::cout << args << ' '), ...);}, a);
     std::cout << " sizeof TupleNR_t = " 
       << sizeof(TupleNR_t<Args...>) << " ";
   }
 };
 
 template <typename... Args>
-class ApplyArchive
-{
-public:
-  void seralize(TupleNR_t<Args...> &a)
-  {
-    std::apply([](auto&&... args) {((std::cout << args << ' '), ...);}, a);
-    std::cout << " sizeof TupleNR_t = " 
-      << sizeof(TupleNR_t<Args...>) << " ";
-  }
-};
-
-template <typename... Args>
-using Archiver_t = ApplyArchive<Args...>;
+using Archiver_t = coutArchive<Args...>;
 //using Archiver_t = NOPArchive<Args...>;
 
 // CR-4
@@ -235,27 +201,35 @@ using Archiver_t = ApplyArchive<Args...>;
 template <typename... Args>
 struct alignas(sizeof(void*)) Payload
 {
-    using Func_t = uint64_t (*)(RingBuff&);
+  using Func_t = uint64_t (*)(RingBuff&);
 
-    Payload(Func_t f, Args&&... args) 
-      : func_(f)
+  Payload(Func_t f, Args&&... args) 
+    : func_(f)
       , data(args...) 
   {
+    // all of this washes away at compile time.
     auto triv_obj = [](auto a) 
     { 
-      static_assert(std::is_trivially_default_constructible<decltype(a)>::value,"Trivial Default Constructor required");
-      static_assert(std::is_trivially_destructible<decltype(a)>::value, "Trivial Destructor required");
+      static_assert(
+          std::is_trivially_default_constructible
+          <decltype(a)>::value,
+          "Trivial Default Ctor required");
+      static_assert(
+          std::is_trivially_constructible
+          <decltype(a)>::value,
+          "Trivial Ctor required");
+      static_assert(std::is_trivially_destructible
+          <decltype(a)>::value, 
+          "Trivial Dtor required");
     };
 
-    std::apply([triv_obj](auto&&... a) {((triv_obj(a), ...));}, data);
+    std::apply([triv_obj](auto&&... a) 
+        {((triv_obj(a), ...));}, data);
   }
 
-    Func_t func_;
-    TupleNR_t<Args...> data;
+  Func_t func_;
+  TupleNR_t<Args...> data;
 };
-
-// for calculating time between debug statements
-uint64_t last{0};
 
 // CR-2
 // Takes the ring buffer as an argument and casts
@@ -264,7 +238,8 @@ uint64_t last{0};
 // seralizes payload to disk.
 // This is not intended for production use
 // but demonstrate functionality.
-template <template<typename> typename A, typename... Args>
+template <template<typename> typename A,
+  typename... Args>
 uint64_t writeLog (RingBuff& srb)
 {
   using Payload_t = Payload<Args...>;
@@ -369,19 +344,12 @@ public:
 ///////////////////////////////////////////////////////////////////////////////
 #ifdef LOG_CLFLUSHOPT1
 
-    //template <typename... Args>
-    //uint64_t userLog (Args&&... args) __attribute__((flatten));
-
 // CR-5
-// Constructs the payload using placement new within the ring buffer
+// Constructs the payload using placement new
+// within the ring buffer
 template <typename... Args>
 uint64_t userLog (Args&&... args)
 {
-  //((static_assert(std::is_trivially_default_constructible<decltype(args)>::value,
-  //                "Trivial Default Constructor  needed");), ...);
-
-
-
   auto timeStamp = __rdtsc();
   using Payload_t = Payload<TimeStamp_t, Args...>;
 
@@ -392,10 +360,6 @@ uint64_t userLog (Args&&... args)
     return 0;
   }
 
-  // The beauty of placement new!
-  // A simple structure is created
-  // and memory is reused as ring buffer
-  // progresses
   [[maybe_unused]]Payload_t* a = new(mem) 
     Payload_t(
       writeLog<Archiver_t, TimeStamp_t, Args...>
@@ -404,7 +368,6 @@ uint64_t userLog (Args&&... args)
 
   data.produce(sizeof(Payload_t));
 
-  // use RIIA guar for cleanupd?
   data.cleanUpProduce();
   return timeStamp;
 }
