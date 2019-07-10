@@ -31,6 +31,7 @@
 #include <tuple>
 #include <mutex>
 #include <type_traits>
+#include <typeinfo>
 #include <algorithm>
 
 #include <assert.h>
@@ -208,7 +209,19 @@ public:
 };
 
 template <typename... Args>
-using Archiver_t = ETArchive<Args...>;
+class ApplyArchive
+{
+public:
+  void seralize(TupleNR_t<Args...> &a)
+  {
+    std::apply([](auto&&... args) {((std::cout << args << ' '), ...);}, a);
+    std::cout << " sizeof TupleNR_t = " 
+      << sizeof(TupleNR_t<Args...>) << " ";
+  }
+};
+
+template <typename... Args>
+using Archiver_t = ApplyArchive<Args...>;
 //using Archiver_t = NOPArchive<Args...>;
 
 // CR-4
@@ -217,6 +230,8 @@ using Archiver_t = ETArchive<Args...>;
 // It contains the function pointer to the method
 // containing the parmater pack type.
 // Aligned to pointer size
+//
+
 template <typename... Args>
 struct alignas(sizeof(void*)) Payload
 {
@@ -224,7 +239,16 @@ struct alignas(sizeof(void*)) Payload
 
     Payload(Func_t f, Args&&... args) 
       : func_(f)
-      , data(args...) {}
+      , data(args...) 
+  {
+    auto triv_obj = [](auto a) 
+    { 
+      static_assert(std::is_trivially_default_constructible<decltype(a)>::value,"Trivial Default Constructor required");
+      static_assert(std::is_trivially_destructible<decltype(a)>::value, "Trivial Destructor required");
+    };
+
+    std::apply([triv_obj](auto&&... a) {((triv_obj(a), ...));}, data);
+  }
 
     Func_t func_;
     TupleNR_t<Args...> data;
@@ -353,6 +377,11 @@ public:
 template <typename... Args>
 uint64_t userLog (Args&&... args)
 {
+  //((static_assert(std::is_trivially_default_constructible<decltype(args)>::value,
+  //                "Trivial Default Constructor  needed");), ...);
+
+
+
   auto timeStamp = __rdtsc();
   using Payload_t = Payload<TimeStamp_t, Args...>;
 
